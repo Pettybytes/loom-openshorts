@@ -65,6 +65,9 @@ def main() -> int:
             'retries': 2,
             'nocheckcertificate': True,
             'cachedir': False,
+            # FACTORY-INGEST-001: keep this probe's view of the URL consistent
+            # with the actual download (main.py), which now sets noplaylist too.
+            'noplaylist': True,
         }
         # yt-dlp's default player clients (tv_downgraded/web_safari with
         # cookies, android_vr/web_safari anonymous) are the ones that still

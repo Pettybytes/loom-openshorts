@@ -814,6 +814,10 @@ def download_youtube_video(url, output_dir="."):
             'cookiefile': cookies_path if (cookies and cookies_path) else None,
             'proxy': proxy, 'socket_timeout': 30, 'retries': 10, 'fragment_retries': 10,
             'nocheckcertificate': True, 'cachedir': False,
+            # FACTORY-INGEST-001: a URL with both a video id and a list id (e.g.
+            # an auto-generated Radio/Mix, list=RD...) defaults to downloading
+            # the whole list. This app only ever wants the single submitted video.
+            'noplaylist': True,
             'extractor_args': extractor_args,
             'http_headers': {
                 'User-Agent': (
