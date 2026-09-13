@@ -500,6 +500,71 @@ def _canonical_clip_file(output_dir, base_name, index):
     return os.path.basename(max(derived, key=os.path.getmtime))
 
 
+def _clip_speech_stats(transcript, start, end):
+    """Count transcribed words and segments that overlap a clip's [start, end]
+    window. Authoritative per-clip speech evidence: a clip cut from an
+    instrumental stretch has zero words/segments in range, while a spoken clip
+    has words. Never derived from a secondary/empty transcript fetch."""
+    words = 0
+    segs = 0
+    for seg in ((transcript or {}).get('segments') or []):
+        s_start = float(seg.get('start', 0) or 0)
+        s_end = float(seg.get('end', 0) or 0)
+        if s_end <= start or s_start >= end:
+            continue
+        segs += 1
+        for w in (seg.get('words') or []):
+            w_start = float(w.get('start', 0) or 0)
+            w_end = float(w.get('end', 0) or 0)
+            if w_end > start and w_start < end:
+                words += 1
+    return words, segs
+
+
+def _clip_asset_contract(output_dir, base_name, index, ready_files, transcript,
+                         start, end):
+    """The renderer-declared final asset for clip ``index`` plus the
+    caption/hook/no-speech contract.
+
+    ``ready_files`` is populated from main.py's ``CLIP_READY`` marker, which
+    is printed only after the FULL render chain (reframe → watermark → hook →
+    captions). It is authoritative: it can never name a half-written file or a
+    hook-only intermediate. ``_canonical_clip_file`` (a modification-time
+    guess) is used only as a fallback for jobs recovered from disk, where the
+    in-memory ``ready_files`` map no longer exists.
+    """
+    ready_file = (ready_files or {}).get(index)
+    if not ready_file or not os.path.exists(os.path.join(output_dir, ready_file)):
+        ready_file = _canonical_clip_file(output_dir, base_name, index)
+
+    # Layered filename convention: ``subtitled_<ts>_...`` = captions are the
+    # LAST layer; ``hooked_<ts>_``/``hook_`` = a burned hook. Derive status
+    # from the actual final filename, never from a modification-time guess.
+    captions_applied = bool(re.match(r'^subtitled_\d+_', ready_file))
+    stripped = re.sub(r'^subtitled_\d+_', '', ready_file)
+    hook_applied = bool(re.match(r'^(?:hooked_\d+_|hook_)', stripped))
+
+    # no_speech is AUTHORITATIVE per-CLIP evidence: does this clip's OWN
+    # [start, end] window contain any transcribed words? A clip cut from an
+    # instrumental stretch has zero words in range and correctly ships without
+    # captions; a spoken clip has words. This is derived from the metadata
+    # transcript (written by main.py from the actual transcription) — never
+    # from a secondary or empty transcript fetch, and never from the
+    # whole-video segment count (which is too coarse for a single clip).
+    words_in_window, segs_in_window = _clip_speech_stats(transcript, start, end)
+    no_speech = (words_in_window == 0) and (segs_in_window == 0)
+
+    return {
+        'master_asset': f"{base_name}_clip_{index + 1}.mp4",
+        'ready_file': ready_file,
+        'captions_applied': captions_applied,
+        'hook_applied': hook_applied,
+        'no_speech': no_speech,
+        'transcript_segment_count': segs_in_window,
+        'render_version': '1.0',
+    }
+
+
 def _strip_burned_captions(output_dir, filename):
     """Walk ``subtitled_<ts>_`` prefixes back to the file without burned captions.
 
@@ -590,11 +655,18 @@ def _recover_jobs_from_disk():
                 data = json.load(f)
             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
             clips = data.get('shorts', [])
+            transcript = data.get('transcript') or {}
+            # ready_files is in-memory only (CLIP_READY markers), so recovery
+            # falls back to the mtime canonical name — but still computes the
+            # full per-clip caption/hook/no-speech contract so the review
+            # surface is consistent after a restart.
             for i, clip in enumerate(clips):
+                contract = _clip_asset_contract(job_path, base_name, i, {},
+                                                transcript, clip.get('start', 0),
+                                                clip.get('end', 0))
+                clip.update(contract)
                 if not clip.get('video_url'):
-                    clip['video_url'] = (
-                        f"/videos/{job_id}/"
-                        f"{_canonical_clip_file(job_path, base_name, i)}")
+                    clip['video_url'] = f"/videos/{job_id}/{contract['ready_file']}"
             owner = None
             owner_path = os.path.join(job_path, ".owner")
             if os.path.exists(owner_path):
@@ -1444,6 +1516,14 @@ async def _webhook_clip_entries(job_id, job):
             "index": i,
             "title": clip.get('title') or clip.get('video_title_for_youtube_short'),
             "video_url": f"{base}{rel}" if rel.startswith("/") and base else rel,
+            # Renderer-declared final-asset contract (carried so the Factory
+            # never re-selects an asset by mtime or assumes a hooked_ name).
+            "ready_file": clip.get('ready_file'),
+            "master_asset": clip.get('master_asset'),
+            "captions_applied": clip.get('captions_applied'),
+            "hook_applied": clip.get('hook_applied'),
+            "no_speech": clip.get('no_speech'),
+            "transcript_segment_count": clip.get('transcript_segment_count'),
         })
     if BILLING_ENABLED and job.get('user_id'):
         try:
@@ -1893,14 +1973,23 @@ async def run_job(job_id, job_data):
                 with open(target_json, 'r') as f:
                     data = json.load(f)
                 
-                # Enhance result with video URLs
+                # Enhance result with the renderer-declared final asset and the
+                # caption/hook/no-speech contract. CLIP_READY (ready_files) is
+                # authoritative — main.py prints it only after the full chain
+                # (reframe → watermark → hook → captions) — so it can never be a
+                # half-written or hook-only intermediate. _canonical_clip_file
+                # (mtime) is a fallback only.
                 base_name = os.path.basename(target_json).replace('_metadata.json', '')
                 clips = data.get('shorts', [])
                 cost_analysis = data.get('cost_analysis')
+                transcript = data.get('transcript') or {}
+                ready_files = (jobs.get(job_id) or {}).get('ready_files') or {}
 
                 for i, clip in enumerate(clips):
-                     clip_filename = _canonical_clip_file(output_dir, base_name, i)
-                     clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+                     contract = _clip_asset_contract(output_dir, base_name, i, ready_files,
+                                                     transcript, clip.get('start', 0), clip.get('end', 0))
+                     clip.update(contract)
+                     clip['video_url'] = f"/videos/{job_id}/{contract['ready_file']}"
                 
                 jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
             else:
