@@ -9,6 +9,16 @@ export const getToken = () => localStorage.getItem(AUTH_TOKEN_KEY) || '';
 export const setToken = (t) => localStorage.setItem(AUTH_TOKEN_KEY, t);
 export const clearToken = () => localStorage.removeItem(AUTH_TOKEN_KEY);
 
+// Editor session token (Discord Activity / LOOM editor). When set, it overrides
+// the OpenShorts auth token on /api/* calls so the LOOM adapter gateway can
+// authorize the request against the short-lived editor session instead of the
+// user's OpenShorts session. This is scoped to the editor mount; it is never
+// persisted to storage.
+let editorSessionToken = '';
+export const setEditorSessionToken = (t) => { editorSessionToken = t || ''; };
+export const clearEditorSessionToken = () => { editorSessionToken = ''; };
+export const getEditorSessionToken = () => editorSessionToken;
+
 export class QuotaError extends Error {
   constructor(detail) {
     super('quota_exceeded');
@@ -21,7 +31,10 @@ export class QuotaError extends Error {
 // Drop-in fetch wrapper. Always attaches the bearer token when present.
 export async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  const token = getToken();
+  // The editor session token takes precedence over the OpenShorts auth token:
+  // in the embedded Activity the /api/* calls are gated by the LOOM adapter
+  // against the short-lived editor session, not the user's OpenShorts login.
+  const token = editorSessionToken || getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
   const res = await fetch(getApiUrl(path), { ...options, headers });
