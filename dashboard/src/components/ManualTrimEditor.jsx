@@ -40,6 +40,14 @@ const ALIGNMENT_LABEL = {
   realignment_required: { text: 'realignment required (audio)', cls: 'text-red-400' },
 };
 
+const PROGRESS_ORDER = ['save', 'render', 'register', 'card'];
+const PROGRESS_LABEL = {
+  save: 'draft saved',
+  render: 'rendered',
+  register: 'registered',
+  card: 're-review card sent',
+};
+
 export default function ManualTrimEditor({ initialSession = null, activityUser = null, onReauthenticate = null }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -60,8 +68,13 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [captionStyle, setCaptionStyle] = useState('classic');
   const [captionUppercase, setCaptionUppercase] = useState(false);
   const [instruction, setInstruction] = useState('');
+  const [title, setTitle] = useState('');
+  const [hook, setHook] = useState('');
+  const [socialCaption, setSocialCaption] = useState('');
   const [rerendering, setRerendering] = useState(false);
+  const [progress, setProgress] = useState(null);   // {stage, detail} or null
   const [result, setResult] = useState(null);
+  const [downloadUrl, setDownloadUrl] = useState(null);
 
   const videoRef = useRef(null);
 
@@ -86,12 +99,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     }
 
     const params = new URLSearchParams(window.location.search);
-    const jobId = params.get('job_id');
-    const clipIndex = params.get('clip_index');
     const token = params.get('token');
     if (window.location.search) history.replaceState({}, '', '/edit');
-    if (!jobId || clipIndex == null || !token) {
-      setError('Missing job_id, clip_index, or token.');
+    if (!token) {
+      setError('Missing editor token.');
       setLoading(false);
       return;
     }
@@ -107,7 +118,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         // Inject the short-lived editor session token so subsequent /api/* calls
         // are authorized by the LOOM adapter gateway against this session.
         if (data.session?.session_token) setEditorSessionToken(data.session.session_token);
-        setSession({ ...data.session, job_id: jobId, clip_index: Number(clipIndex) });
+        setSession({ ...data.session, job_id: data.session?.job_id, clip_index: Number(data.session?.clip_index ?? 0) });
       } catch (e) {
         if (!cancelled) { setError('Token exchange error: ' + (e && e.message ? e.message : String(e))); setLoading(false); }
       }
@@ -145,12 +156,22 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           if (e.framing === 'full' || e.framing === 'track') setFraming(e.framing);
         }
 
-        // Restore a previously persisted trim draft (survives Activity reload).
+        // Restore a previously persisted draft (survives reload). title/hook/
+        // social caption/subtitle controls + trim + framing all persist.
         const d = session.draft;
-        if (d && d.trim_start != null && d.trim_end != null) {
-          setTrimStart(Number(d.trim_start));
-          setTrimEnd(Number(d.trim_end));
+        if (d) {
+          if (d.trim_start != null && d.trim_end != null) {
+            setTrimStart(Number(d.trim_start));
+            setTrimEnd(Number(d.trim_end));
+          }
           if (d.framing) setFraming(d.framing);
+          if (d.title != null) setTitle(d.title);
+          if (d.hook != null) setHook(d.hook);
+          if (d.social_caption != null) setSocialCaption(d.social_caption);
+          if (d.caption_position) setCaptionPosition(d.caption_position);
+          if (d.caption_style) setCaptionStyle(d.caption_style);
+          if (d.caption_uppercase != null) setCaptionUppercase(d.caption_uppercase);
+          if (d.instruction != null) setInstruction(d.instruction);
         }
 
         const tRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/transcript`);
@@ -159,8 +180,9 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           const w = Array.isArray(t) ? t : (t?.captions || t?.words || t?.segments || []);
           setWords(w);
           const joined = w.map(x => x?.text ?? x?.word ?? x?.w ?? '').filter(Boolean).join(' ');
-          setCaptionText(joined);
           setOriginalCaptionText(joined);
+          // A persisted draft caption (edited) wins over the transcript default.
+          setCaptionText(session.draft?.caption_text ?? joined);
         }
 
         const scRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/scenes`);
@@ -189,6 +211,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     if (!session || !edl) return;
     if (needsRealignment) { setError('Caption edit requires audio realignment — not rerendering.'); return; }
     setRerendering(true); setResult(null); setError(null); setReauthNeeded(false);
+    setProgress({ stage: 'save', detail: 'Persisting draft…' });
     try {
       const { job_id, clip_index } = session;
 
@@ -216,9 +239,17 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           edit_session_id: session.edit_session_id,
-          draft: { trim_start: Number(trimStart), trim_end: Number(trimEnd), framing },
+          draft: {
+            trim_start: Number(trimStart), trim_end: Number(trimEnd), framing,
+            title, hook, social_caption: socialCaption,
+            caption_text: captionText, caption_position: captionPosition,
+            caption_style: captionStyle, caption_uppercase: captionUppercase,
+            instruction,
+          },
         }),
       });
+
+      setProgress({ stage: 'render', detail: captionChanged ? 'Applying subtitles…' : 'Rendering clip…' });
 
       // TEMP fingerprint diagnostics: module token before subtitle and rerender.
       console.debug(`[loom-auth-diag] before-subtitle fp=${await editorTokenFingerprint()}`);
@@ -247,12 +278,17 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         // Keep the editor visible; surface a Reauthenticate/Retry affordance.
         setReauthNeeded(true);
         setError('Session expired or invalid — reauthenticate to continue.');
+        setProgress(null);
         setRerendering(false);
         return;
       }
-      if (!rrRes.ok) { setError('Rerender failed: ' + (rrData?.detail || rrData?.error || rrRes.status)); setRerendering(false); return; }
+      if (!rrRes.ok) { setError('Rerender failed: ' + (rrData?.detail || rrData?.error || rrRes.status)); setProgress(null); setRerendering(false); return; }
+
+      const renderedUrl = rrData?.new_video_url;
+      if (renderedUrl) setDownloadUrl(getApiUrl(renderedUrl));
 
       // Register the new asset version + send the re-review card.
+      setProgress({ stage: 'register', detail: 'Registering new version…' });
       const completeRes = await fetch(EDITOR_COMPLETE_URL, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -262,20 +298,44 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           caption_changes, crop_reframe_changes,
           instruction: instruction.trim() || undefined, llm_assist_used: false,
           edl_metadata: { caption_applied: subtitleApplied, framing, segments },
-          job_id, ready_file: outputBasename(rrData?.new_video_url),
+          job_id, ready_file: outputBasename(renderedUrl),
+          proposed_title: title.trim() || undefined,
+          hook: hook.trim() || undefined,
+          caption: socialCaption.trim() || undefined,
           duration_seconds: Number(trimEnd) - Number(trimStart),
           correction_summary: buildSummary(caption_changes, crop_reframe_changes),
         }),
       });
       const completeData = await completeRes.json();
-      if (!completeData.ok) { setError('Registration failed: ' + (completeData.error || 'unknown')); setRerendering(false); return; }
+      if (!completeData.ok) { setError('Registration failed: ' + (completeData.error || 'unknown')); setProgress(null); setRerendering(false); return; }
       setResult(completeData);
+      setProgress({ stage: 'card', detail: null });
     } catch (e) {
       setError('Rerender error: ' + (e && e.message ? e.message : String(e)));
+      setProgress(null);
     } finally {
       setRerendering(false);
     }
-  }, [session, edl, trimStart, trimEnd, framing, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, instruction, words, realigned, needsRealignment]);
+  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, instruction, words, realigned, needsRealignment]);
+
+  const handleDownload = useCallback(async () => {
+    if (!downloadUrl) return;
+    try {
+      const res = await fetch(downloadUrl);
+      if (!res.ok) throw new Error('download failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `edited_${(session?.clip_id || 'clip').replace(/[:/]/g, '_')}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError('Download failed: ' + (e?.message || String(e)));
+    }
+  }, [downloadUrl, session]);
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center bg-paper text-ink2"><p className="text-sm text-muted">Opening editor session…</p></div>;
@@ -339,8 +399,29 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
               ))}
             </div>
 
+            <h2 className="font-display lowercase text-xl text-ink pt-2">title</h2>
+            <label className="block text-xs text-muted">shorts title
+              <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g. The manager cancelled EVERY subscription…"
+                className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink" />
+            </label>
+
+            <h2 className="font-display lowercase text-xl text-ink pt-2">hook</h2>
+            <label className="block text-xs text-muted">hook / overlay line
+              <input type="text" value={hook} onChange={(e) => setHook(e.target.value)}
+                placeholder="e.g. Wait for the ending…"
+                className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink" />
+            </label>
+
+            <h2 className="font-display lowercase text-xl text-ink pt-2">social caption</h2>
+            <label className="block text-xs text-muted">caption for the social post (separate from the spoken subtitles below)
+              <textarea value={socialCaption} onChange={(e) => setSocialCaption(e.target.value)} rows={2}
+                placeholder="post caption with emojis + hashtags"
+                className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink resize-y" />
+            </label>
+
             <h2 className="font-display lowercase text-xl text-ink pt-2">
-              captions <span className={`text-xs ml-1 ${align.cls}`}>({align.text})</span>
+              spoken subtitles <span className={`text-xs ml-1 ${align.cls}`}>({align.text})</span>
             </h2>
             <label className="block text-xs text-muted">text
               <textarea value={captionText} onChange={(e) => setCaptionText(e.target.value)} rows={2}
@@ -386,11 +467,21 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             </label>
 
             <button onClick={handleRerender} disabled={rerendering || !edl || needsRealignment} className="btn-primary px-4 py-2 w-full disabled:opacity-50">
-              {rerendering ? 'rerendering…' : 'rerender + register new asset version'}
+              {rerendering ? (progress?.detail || 'working…') : 'save · render · register · send re-review card'}
             </button>
+            {progress && (
+              <div className="text-xs text-muted space-y-1">
+                {PROGRESS_ORDER.map((s) => (
+                  <div key={s} className="flex items-center gap-2">
+                    <span className={`w-2 h-2 rounded-full ${progressStageRank(progress.stage) >= progressStageRank(s) ? 'bg-brass' : 'bg-rule'}`} />
+                    <span className={progressStageRank(progress.stage) >= progressStageRank(s) ? 'text-ink' : ''}>{PROGRESS_LABEL[s]}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             {reauthNeeded && (
               <div className="text-xs text-amber-300 bg-amber-400/10 border border-amber-400/20 rounded-lg p-3 space-y-2">
-                <p>Your editor session is no longer authorized. Your trim draft is preserved — reauthenticate or retry.</p>
+                <p>Your editor session is no longer authorized. Your draft is preserved — reauthenticate or retry.</p>
                 <div className="flex gap-2">
                   {onReauthenticate && (
                     <button onClick={async () => { const ok = await onReauthenticate(); if (ok) { setReauthNeeded(false); setError(null); } }}
@@ -400,7 +491,21 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                 </div>
               </div>
             )}
-            {result && <div className="text-sm text-ink bg-background border border-rule rounded-lg p-3">✓ registered as new asset version — re-review card sent</div>}
+            {result && (
+              <div className="text-sm text-ink bg-background border border-rule rounded-lg p-3 space-y-2">
+                <div>✓ registered as new asset version — re-review card sent</div>
+                <div className="flex flex-wrap gap-2">
+                  {downloadUrl && (
+                    <button onClick={handleDownload} className="btn-ghost px-3 py-1.5">Download edited clip</button>
+                  )}
+                  {session?.launch_guild_id && session?.launch_channel_id && (
+                    <a href={`https://discord.com/channels/${session.launch_guild_id}/${session.launch_channel_id}`}
+                       target="_blank" rel="noopener noreferrer"
+                       className="btn-ghost px-3 py-1.5 inline-flex items-center gap-1">Return to Discord Review</a>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -440,4 +545,9 @@ function buildSummary(caption, reframe) {
   if (reframe?.framing && reframe.framing !== 'auto') parts.push(`reframe=${reframe.framing}`);
   if (caption?.alignment && caption.alignment !== 'preserved') parts.push(`caption=${caption.alignment}`);
   return parts.length ? parts.join(', ') : 'manual edit (trim)';
+}
+
+function progressStageRank(stage) {
+  const i = PROGRESS_ORDER.indexOf(stage);
+  return i === -1 ? -1 : i;
 }
