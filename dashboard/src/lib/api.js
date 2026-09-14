@@ -19,6 +19,27 @@ export const setEditorSessionToken = (t) => { editorSessionToken = t || ''; };
 export const clearEditorSessionToken = () => { editorSessionToken = ''; };
 export const getEditorSessionToken = () => editorSessionToken;
 
+// ---------------------------------------------------------------------------
+// TEMPORARY auth diagnostics (remove after token-mismatch proof).
+// One-way SHA-256 prefix of a bearer token — never the raw token.
+// ---------------------------------------------------------------------------
+let _diagReqId = 0;
+
+export async function tokenFingerprint(token) {
+  if (!token) return 'none';
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+    const arr = Array.from(new Uint8Array(buf));
+    return arr.slice(0, 6).map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch (_) {
+    return 'err';
+  }
+}
+
+export async function editorTokenFingerprint() {
+  return tokenFingerprint(editorSessionToken);
+}
+
 export class QuotaError extends Error {
   constructor(detail) {
     super('quota_exceeded');
@@ -35,6 +56,10 @@ export async function apiFetch(path, options = {}) {
   // in the embedded Activity the /api/* calls are gated by the LOOM adapter
   // against the short-lived editor session, not the user's OpenShorts login.
   const token = editorSessionToken || getToken();
+  const reqId = ++_diagReqId;
+  // TEMPORARY sanitized auth diagnostics (remove after proof).
+  const fp = await tokenFingerprint(token);
+  console.debug(`[loom-auth-diag] req#${reqId} ${path} auth=${!!token} fp=${fp}`);
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
   const res = await fetch(getApiUrl(path), { ...options, headers });

@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { initDiscordActivity, requestAuthorizationCode, authenticateWithToken, fetchPendingContext } from '../lib/discordActivity';
+import { setEditorSessionToken } from '../lib/api';
 import ManualTrimEditor from './ManualTrimEditor';
 
 // LOOM Activity root — the page Discord iframes when the Activity is launched.
@@ -42,6 +43,22 @@ export default function LoomActivityRoot() {
   const [session, setSession] = useState(null);
   const [activityUser, setActivityUser] = useState(null);
   const [errMsg, setErrMsg] = useState('');
+  const accessTokenRef = useRef('');
+
+  // Re-authenticate: re-run the pending-context resolution using the stored
+  // OAuth access token, minting a fresh editor session token. Used when a 401
+  // is surfaced mid-edit (keep the editor visible, offer this affordance).
+  const reauthenticate = useCallback(async () => {
+    const accessToken = accessTokenRef.current;
+    if (!accessToken) return false;
+    const pending = await fetchPendingContext(accessToken);
+    if (pending && pending.ok && pending.pending && pending.session) {
+      if (pending.session.session_token) setEditorSessionToken(pending.session.session_token);
+      setSession(pending.session);
+      return true;
+    }
+    return false;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,6 +99,7 @@ export default function LoomActivityRoot() {
         if (!cancelled) { setErrMsg(oauthData.error || 'OAuth exchange failed.'); setState('error'); }
         return;
       }
+      accessTokenRef.current = oauthData.access_token;
 
       const auth = await authenticateWithToken(oauthData.access_token);
       if (cancelled) return;
@@ -151,5 +169,5 @@ export default function LoomActivityRoot() {
     return <WaitingScreen />;
   }
 
-  return <ManualTrimEditor initialSession={session} activityUser={activityUser} />;
+  return <ManualTrimEditor initialSession={session} activityUser={activityUser} onReauthenticate={reauthenticate} />;
 }

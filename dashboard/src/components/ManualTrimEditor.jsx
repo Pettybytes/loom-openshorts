@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { getApiUrl } from '../config';
-import { apiFetch, setEditorSessionToken, clearEditorSessionToken } from '../lib/api';
+import { apiFetch, setEditorSessionToken, clearEditorSessionToken, editorTokenFingerprint } from '../lib/api';
 import { realignCaptions } from '../lib/captionRealign';
 
 // Relative public paths: the editor is served from the same public origin as
@@ -40,7 +40,7 @@ const ALIGNMENT_LABEL = {
   realignment_required: { text: 'realignment required (audio)', cls: 'text-red-400' },
 };
 
-export default function ManualTrimEditor({ initialSession = null, activityUser = null }) {
+export default function ManualTrimEditor({ initialSession = null, activityUser = null, onReauthenticate = null }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -174,14 +174,21 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   }, [words, captionText, clipDurationMs]);
 
   const needsRealignment = realigned?.alignment === 'realignment_required';
+  const [reauthNeeded, setReauthNeeded] = useState(false);
 
   // --- 4. Apply caption + rerender + register + card -------------------------------
   const handleRerender = useCallback(async () => {
     if (!session || !edl) return;
     if (needsRealignment) { setError('Caption edit requires audio realignment — not rerendering.'); return; }
-    setRerendering(true); setResult(null); setError(null);
+    setRerendering(true); setResult(null); setError(null); setReauthNeeded(false);
     try {
       const { job_id, clip_index } = session;
+
+      // Trim-only detection: caption text/style/position/uppercase unchanged.
+      const captionChanged = captionText !== originalCaptionText
+        || captionPosition !== 'bottom'
+        || captionStyle !== 'classic'
+        || captionUppercase !== false;
 
       const caption_changes = {
         text: captionText,
@@ -195,12 +202,31 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       };
       const crop_reframe_changes = { framing };
 
-      // Caption application with redistributed word timings (no Gemini).
-      const wordsPayload = (realigned?.blocks ?? []).map(b => ({ text: b.text, startMs: b.startMs, endMs: b.endMs }));
-      const subRes = await apiFetch('/api/subtitle', {
+      // Persist the trim draft server-side BEFORE render so an Activity reload
+      // cannot erase it.
+      await apiFetch('/discord/editor/draft', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id, clip_index, position: captionPosition, style: captionStyle, uppercase: captionUppercase, words: wordsPayload }),
+        body: JSON.stringify({
+          edit_session_id: session.edit_session_id,
+          draft: { trim_start: Number(trimStart), trim_end: Number(trimEnd), framing },
+        }),
       });
+
+      // TEMP fingerprint diagnostics: module token before subtitle and rerender.
+      console.debug(`[loom-auth-diag] before-subtitle fp=${await editorTokenFingerprint()}`);
+
+      let subtitleApplied = false;
+      if (captionChanged) {
+        // Caption application with redistributed word timings (no Gemini).
+        const wordsPayload = (realigned?.blocks ?? []).map(b => ({ text: b.text, startMs: b.startMs, endMs: b.endMs }));
+        const subRes = await apiFetch('/api/subtitle', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id, clip_index, position: captionPosition, style: captionStyle, uppercase: captionUppercase, words: wordsPayload }),
+        });
+        subtitleApplied = subRes.ok;
+      }
+
+      console.debug(`[loom-auth-diag] before-rerender fp=${await editorTokenFingerprint()}`);
 
       // FAST rerender (trim + framing).
       const segments = [{ start: Number(trimStart), end: Number(trimEnd) }];
@@ -209,6 +235,13 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         body: JSON.stringify({ job_id, clip_index, segments, snap_to_words: true, reapply_captions: true, framing: framing === 'auto' ? undefined : framing }),
       });
       const rrData = await rrRes.json();
+      if (rrRes.status === 401) {
+        // Keep the editor visible; surface a Reauthenticate/Retry affordance.
+        setReauthNeeded(true);
+        setError('Session expired or invalid — reauthenticate to continue.');
+        setRerendering(false);
+        return;
+      }
       if (!rrRes.ok) { setError('Rerender failed: ' + (rrData?.detail || rrData?.error || rrRes.status)); setRerendering(false); return; }
 
       // Register the new asset version + send the re-review card.
@@ -220,7 +253,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           trim_start: Number(trimStart), trim_end: Number(trimEnd),
           caption_changes, crop_reframe_changes,
           instruction: instruction.trim() || undefined, llm_assist_used: false,
-          edl_metadata: { caption_applied: subRes.ok, framing, segments },
+          edl_metadata: { caption_applied: subtitleApplied, framing, segments },
           job_id, ready_file: outputBasename(rrData?.new_video_url),
           duration_seconds: Number(trimEnd) - Number(trimStart),
           correction_summary: buildSummary(caption_changes, crop_reframe_changes),
@@ -234,7 +267,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     } finally {
       setRerendering(false);
     }
-  }, [session, edl, trimStart, trimEnd, framing, captionText, captionPosition, captionStyle, captionUppercase, instruction, words, realigned, needsRealignment]);
+  }, [session, edl, trimStart, trimEnd, framing, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, instruction, words, realigned, needsRealignment]);
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center bg-paper text-ink2"><p className="text-sm text-muted">Opening editor session…</p></div>;
@@ -347,6 +380,18 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             <button onClick={handleRerender} disabled={rerendering || !edl || needsRealignment} className="btn-primary px-4 py-2 w-full disabled:opacity-50">
               {rerendering ? 'rerendering…' : 'rerender + register new asset version'}
             </button>
+            {reauthNeeded && (
+              <div className="text-xs text-amber-300 bg-amber-400/10 border border-amber-400/20 rounded-lg p-3 space-y-2">
+                <p>Your editor session is no longer authorized. Your trim draft is preserved — reauthenticate or retry.</p>
+                <div className="flex gap-2">
+                  {onReauthenticate && (
+                    <button onClick={async () => { const ok = await onReauthenticate(); if (ok) { setReauthNeeded(false); setError(null); } }}
+                      className="btn-ghost px-3 py-1.5">Reauthenticate</button>
+                  )}
+                  <button onClick={handleRerender} className="btn-ghost px-3 py-1.5">Retry</button>
+                </div>
+              </div>
+            )}
             {result && <div className="text-sm text-ink bg-background border border-rule rounded-lg p-3">✓ registered as new asset version — re-review card sent</div>}
           </div>
         </div>
