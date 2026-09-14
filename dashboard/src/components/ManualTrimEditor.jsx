@@ -48,6 +48,31 @@ const PROGRESS_LABEL = {
   card: 're-review card sent',
 };
 
+// --- External HTTPS /edit bootstrap -------------------------------------
+// The single-use launch token is exchanged EXACTLY ONCE per page load. React
+// StrictMode double-invokes effects in dev, and the token is stripped from the
+// URL via history.replaceState on the first pass — so a later pass must NOT
+// treat the now-absent token as an error, and must NOT re-exchange (the server
+// token is single-use). We retain the authenticated session in module memory
+// (page lifecycle) and in sessionStorage (session-scoped: survives a reload,
+// dies with the tab). The single-use launch token is never persisted anywhere.
+const EDITOR_SESSION_STORAGE_KEY = 'loom_editor_session_v1';
+let _exchangePromise = null;   // in-flight (or resolved) single exchange
+let _resolvedSession = null;   // authenticated session, retained for the page
+
+function loadStoredEditorSession() {
+  try {
+    const raw = sessionStorage.getItem(EDITOR_SESSION_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) { return null; }
+}
+function storeEditorSession(session) {
+  try { sessionStorage.setItem(EDITOR_SESSION_STORAGE_KEY, JSON.stringify(session)); } catch (_) { /* ignore */ }
+}
+function clearStoredEditorSession() {
+  try { sessionStorage.removeItem(EDITOR_SESSION_STORAGE_KEY); } catch (_) { /* ignore */ }
+}
+
 export default function ManualTrimEditor({ initialSession = null, activityUser = null, onReauthenticate = null }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -98,31 +123,65 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       return;
     }
 
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('token');
+    // Capture the launch token (if present) and strip it from the URL. The
+    // token is single-use and never persisted; the URL is sanitized so a
+    // reload or referer cannot replay it.
+    const token = new URLSearchParams(window.location.search).get('token');
     if (window.location.search) history.replaceState({}, '', '/edit');
-    if (!token) {
-      setError('Missing editor token.');
+
+    // Restore a previously-authenticated session. React StrictMode double-
+    // invokes effects in dev and route remounts remount this component, so a
+    // session retained from an earlier pass (or a reload) must be reused —
+    // never mistaken for "missing token".
+    const retained = _resolvedSession || loadStoredEditorSession();
+    if (retained) {
+      if (retained.session_token) setEditorSessionToken(retained.session_token);
+      setSession({ ...retained, job_id: retained.job_id, clip_index: Number(retained.clip_index ?? 0) });
       setLoading(false);
       return;
     }
-    let cancelled = false;
-    (async () => {
-      try {
+
+    // One exchange per page load, shared across effect invocations. If an
+    // exchange is already in flight (StrictMode double-mount), reuse it — never
+    // re-exchange the consumed single-use token.
+    let promise = _exchangePromise;
+    if (!promise && token) {
+      promise = _exchangePromise = (async () => {
         const res = await fetch(EDITOR_EXCHANGE_URL, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
         });
         const data = await res.json();
+        if (!data.ok || !data.session) {
+          throw new Error(data.error || 'Could not open the editor session.');
+        }
+        return data.session;
+      })();
+    }
+
+    if (!promise) {
+      // No token, no retained session, no in-flight exchange: genuine state.
+      setError("No editor session is pending — open it from the review card's Edit button.");
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    promise
+      .then((s) => {
         if (cancelled) return;
-        if (!data.ok) { setError(data.error || 'Token exchange failed.'); setLoading(false); return; }
-        // Inject the short-lived editor session token so subsequent /api/* calls
-        // are authorized by the LOOM adapter gateway against this session.
-        if (data.session?.session_token) setEditorSessionToken(data.session.session_token);
-        setSession({ ...data.session, job_id: data.session?.job_id, clip_index: Number(data.session?.clip_index ?? 0) });
-      } catch (e) {
-        if (!cancelled) { setError('Token exchange error: ' + (e && e.message ? e.message : String(e))); setLoading(false); }
-      }
-    })();
+        if (s?.session_token) setEditorSessionToken(s.session_token);
+        _resolvedSession = s;
+        storeEditorSession(s);
+        setSession({ ...s, job_id: s?.job_id, clip_index: Number(s?.clip_index ?? 0) });
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        _exchangePromise = null; // allow a future retry with a fresh token
+        setError(e?.message || 'Could not open the editor session.');
+        setLoading(false);
+      });
     return () => { cancelled = true; };
   }, [initialSession]);
 
@@ -276,6 +335,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       const rrData = await rrRes.json();
       if (rrRes.status === 401) {
         // Keep the editor visible; surface a Reauthenticate/Retry affordance.
+        // Clear the retained authenticated state — the session has expired.
+        clearStoredEditorSession(); _resolvedSession = null;
         setReauthNeeded(true);
         setError('Session expired or invalid — reauthenticate to continue.');
         setProgress(null);
@@ -308,6 +369,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       });
       const completeData = await completeRes.json();
       if (!completeData.ok) { setError('Registration failed: ' + (completeData.error || 'unknown')); setProgress(null); setRerendering(false); return; }
+      // The editor session is now complete — clear retained browser state.
+      clearStoredEditorSession(); _resolvedSession = null;
       setResult(completeData);
       setProgress({ stage: 'card', detail: null });
     } catch (e) {
