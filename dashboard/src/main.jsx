@@ -11,6 +11,7 @@ import AccountPage from './components/AccountPage'
 import LoginModal from './components/LoginModal'
 import OAuthConsent from './components/OAuthConsent'
 import ManualTrimEditor from './components/ManualTrimEditor'
+import EditorErrorBoundary from './components/EditorErrorBoundary'
 import LoomActivityRoot from './components/LoomActivityRoot'
 import { isDiscordActivity } from './lib/discordActivity'
 
@@ -108,7 +109,7 @@ function Root() {
 
   if (view === 'legal') return <Legal />;
   if (view === 'activity') return <LoomActivityRoot />;
-  if (view === 'editor') return <ManualTrimEditor />;
+  if (view === 'editor') return <EditorErrorBoundary><ManualTrimEditor /></EditorErrorBoundary>;
   if (view === 'pricing') return <PricingView />;
   if (view === 'account') return <AccountView />;
   if (view === 'oauth') return <OAuthConsent />;

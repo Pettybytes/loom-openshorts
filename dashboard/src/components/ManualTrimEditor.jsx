@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Download, Wand2, Type, Scissors, Crosshair, ArrowLeft, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { getApiUrl } from '../config';
-import { apiFetch, setEditorSessionToken, clearEditorSessionToken, editorTokenFingerprint } from '../lib/api';
+import { apiFetch, setEditorSessionToken, clearEditorSessionToken, editorTokenFingerprint, getEditorSessionToken } from '../lib/api';
 import { realignCaptions } from '../lib/captionRealign';
 
 // Relative public paths: the editor is served from the same public origin as
@@ -15,9 +16,9 @@ const EDITOR_COMPLETE_URL =
 function fmt(s) {
   const n = Number(s);
   if (!Number.isFinite(n)) return '—';
-  const m = Math.floor(n / 60);
-  const sec = (n % 60).toFixed(1).padStart(4, '0');
-  return `${m}:${sec}`;
+  const m = Math.floor(Math.abs(n) / 60);
+  const sec = (Math.abs(n) % 60).toFixed(1).padStart(4, '0');
+  return `${n < 0 ? '-' : ''}${m}:${sec}`;
 }
 
 function seekTo(videoRef, t) {
@@ -56,7 +57,7 @@ const PROGRESS_LABEL = {
 // token is single-use). We retain the authenticated session in module memory
 // (page lifecycle) and in sessionStorage (session-scoped: survives a reload,
 // dies with the tab). The single-use launch token is never persisted anywhere.
-const EDITOR_SESSION_STORAGE_KEY = 'loom_editor_session_v1';
+const EDITOR_SESSION_STORAGE_KEY = 'loom_e…n_v1';
 let _exchangePromise = null;   // in-flight (or resolved) single exchange
 let _resolvedSession = null;   // authenticated session, retained for the page
 
@@ -83,6 +84,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [words, setWords] = useState([]);          // caption words {text,startMs,endMs}
   const [scenes, setScenes] = useState([]);
   const [canonical, setCanonical] = useState({ start: 0, end: 0 });
+  const [clipDurationSec, setClipDurationSec] = useState(0); // clip-relative timeline length
 
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
@@ -104,13 +106,6 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const videoRef = useRef(null);
 
   // --- 1. Session acquisition -----------------------------------------------
-  // Two paths:
-  //   (a) Activity path: the Activity root already booted the Embedded App SDK,
-  //       completed OAuth, resolved the pending edit context, and hands us a
-  //       fully-resolved session via `initialSession`.
-  //   (b) Deep-link fallback: /edit?job_id=&clip_index=&token=*** consumes the
-  //       single-use launch token via the adapter exchange (private diagnostic
-  //       path only — never the primary Discord experience).
   useEffect(() => {
     if (initialSession) {
       if (initialSession.session_token) setEditorSessionToken(initialSession.session_token);
@@ -238,6 +233,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           const t = await tRes.json();
           const w = Array.isArray(t) ? t : (t?.captions || t?.words || t?.segments || []);
           setWords(w);
+          // The transcript words are CLIP-relative (0..durationSec). Record the
+          // clip timeline length so caption realignment uses the clip timeline,
+          // never the source-time trim window.
+          if (Number.isFinite(Number(t?.durationSec))) setClipDurationSec(Number(t.durationSec));
+          else if (w.length) setClipDurationSec(Math.max(...w.map(x => Number(x?.endMs ?? 0))) / 1000);
           const joined = w.map(x => x?.text ?? x?.word ?? x?.w ?? '').filter(Boolean).join(' ');
           setOriginalCaptionText(joined);
           // A persisted draft caption (edited) wins over the transcript default.
@@ -256,7 +256,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   }, [session]);
 
   // --- 3. Caption timing redistribution (deterministic) ---------------------------
-  const clipDurationMs = Math.max(0, Math.round((Number(trimEnd) - Number(trimStart)) * 1000));
+  // Realignment is bounded by the CLIP-relative timeline (0..clipDurationSec),
+  // independent of the trim window. Trimming is a separate segment operation and
+  // must never be interpreted as rewriting spoken text.
+  const clipDurationMs = Math.max(0, Math.round(clipDurationSec * 1000));
   const realigned = useMemo(() => {
     if (!words.length) return null;
     return realignCaptions(words, captionText, { trimStartMs: 0, trimEndMs: clipDurationMs });
@@ -265,10 +268,42 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const needsRealignment = realigned?.alignment === 'realignment_required';
   const [reauthNeeded, setReauthNeeded] = useState(false);
 
+  const trimDurationSec = Number(trimEnd) - Number(trimStart);
+  const trimInvalid = !Number.isFinite(trimDurationSec) || trimDurationSec <= 0;
+
+  // --- 3b. Debounced draft autosave ----------------------------------------
+  // Persist every editable field to the server as the user edits, so a refresh
+  // or Activity reload restores the full draft (not just what was saved at
+  // rerender time). Also mirror the draft into session-scoped memory so a plain
+  // tab reload can restore it even if the server round-trip hasn't landed yet.
+  // Fire-and-forget; never blocks input.
+  useEffect(() => {
+    if (!session?.edit_session_id) return;
+    if (!session?.session_token && !_resolvedSession?.session_token && !getEditorSessionToken()) return;
+    const draft = {
+      trim_start: Number(trimStart), trim_end: Number(trimEnd), framing,
+      title, hook, social_caption: socialCaption,
+      caption_text: captionText, caption_position: captionPosition,
+      caption_style: captionStyle, caption_uppercase: captionUppercase,
+      instruction,
+    };
+    // Mirror immediately into local memory so a reload restores it.
+    _resolvedSession = { ...(_resolvedSession || {}), draft };
+    storeEditorSession(_resolvedSession);
+    const t = setTimeout(() => {
+      apiFetch('/discord/editor/draft', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ edit_session_id: session.edit_session_id, draft }),
+      }).catch(() => {});
+    }, 700);
+    return () => clearTimeout(t);
+  }, [session?.edit_session_id, session?.session_token, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, instruction]);
+
   // --- 4. Apply caption + rerender + register + card -------------------------------
   const handleRerender = useCallback(async () => {
     if (!session || !edl) return;
     if (needsRealignment) { setError('Caption edit requires audio realignment — not rerendering.'); return; }
+    if (trimInvalid) { setError('Trim range is invalid (start must be before end).'); return; }
     setRerendering(true); setResult(null); setError(null); setReauthNeeded(false);
     setProgress({ stage: 'save', detail: 'Persisting draft…' });
     try {
@@ -292,8 +327,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       };
       const crop_reframe_changes = { framing };
 
-      // Persist the trim draft server-side BEFORE render so an Activity reload
-      // cannot erase it.
+      // Persist EVERY editable field server-side BEFORE render so a reload
+      // cannot erase title/hook/caption/subtitle/trim work.
       await apiFetch('/discord/editor/draft', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -310,9 +345,6 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
 
       setProgress({ stage: 'render', detail: captionChanged ? 'Applying subtitles…' : 'Rendering clip…' });
 
-      // TEMP fingerprint diagnostics: module token before subtitle and rerender.
-      console.debug(`[loom-auth-diag] before-subtitle fp=${await editorTokenFingerprint()}`);
-
       let subtitleApplied = false;
       if (captionChanged) {
         // Caption application with redistributed word timings (no Gemini).
@@ -324,8 +356,6 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         subtitleApplied = subRes.ok;
       }
 
-      console.debug(`[loom-auth-diag] before-rerender fp=${await editorTokenFingerprint()}`);
-
       // FAST rerender (trim + framing).
       const segments = [{ start: Number(trimStart), end: Number(trimEnd) }];
       const rrRes = await apiFetch('/api/clip/rerender', {
@@ -335,7 +365,6 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       const rrData = await rrRes.json();
       if (rrRes.status === 401) {
         // Keep the editor visible; surface a Reauthenticate/Retry affordance.
-        // Clear the retained authenticated state — the session has expired.
         clearStoredEditorSession(); _resolvedSession = null;
         setReauthNeeded(true);
         setError('Session expired or invalid — reauthenticate to continue.');
@@ -369,7 +398,6 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       });
       const completeData = await completeRes.json();
       if (!completeData.ok) { setError('Registration failed: ' + (completeData.error || 'unknown')); setProgress(null); setRerendering(false); return; }
-      // The editor session is now complete — clear retained browser state.
       clearStoredEditorSession(); _resolvedSession = null;
       setResult(completeData);
       setProgress({ stage: 'card', detail: null });
@@ -379,7 +407,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     } finally {
       setRerendering(false);
     }
-  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, instruction, words, realigned, needsRealignment]);
+  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, instruction, words, realigned, needsRealignment, trimInvalid]);
 
   const handleDownload = useCallback(async () => {
     if (!downloadUrl) return;
@@ -419,131 +447,152 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   return (
     <div className="min-h-screen bg-paper text-ink2">
       <header className="h-14 border-b border-rule flex items-center justify-between px-4 sm:px-6">
-        <span className="font-display lowercase text-lg text-ink">LOOM editor</span>
-        <span className="text-xs text-muted">
-          {session?.tenant_id} · {session?.clip_id} · {session?.source_asset_version}
-          {activityUser ? ` · ${activityUser.global_name || activityUser.username || activityUser.id}` : ''}
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="font-display lowercase text-lg text-ink">LOOM editor</span>
+          <span className="readout hidden sm:inline">{session?.tenant_id} · {session?.clip_id} · {session?.source_asset_version}</span>
+        </div>
+        {session?.launch_guild_id && session?.launch_channel_id && (
+          <a href={`https://discord.com/channels/${session.launch_guild_id}/${session.launch_channel_id}`}
+             target="_blank" rel="noopener noreferrer"
+             className="btn-ghost px-3 py-1.5 text-xs inline-flex items-center gap-1.5">
+            <ArrowLeft size={14} /> return to review
+          </a>
+        )}
       </header>
 
-      <main className="p-4 sm:p-6 max-w-5xl mx-auto space-y-6">
-        {error && <div className="text-sm text-red-400 bg-red-400/10 border border-red-400/20 rounded-lg p-3">{error}</div>}
+      <main className="p-4 sm:p-6 max-w-6xl mx-auto space-y-5">
+        {error && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-input text-xs text-danger bg-[color-mix(in_oklab,var(--color-danger)_10%,transparent)]">
+            <AlertCircle size={14} className="shrink-0" /> {error}
+          </div>
+        )}
 
-        <div className="grid md:grid-cols-2 gap-6">
-          <div className="space-y-3">
-            <video ref={videoRef} src={clipUrl} controls className="w-full rounded-lg bg-black aspect-[9/16] object-contain" />
-            {clipUrl == null && <p className="text-xs text-muted">(preview unavailable — no clip URL)</p>}
+        {/* Large preview + Generated Shorts side panel */}
+        <div className="card overflow-hidden flex flex-col lg:flex-row gap-0 lg:min-h-[560px]">
+          {/* Preview column */}
+          <div className="w-full lg:w-[min(42vw,420px)] bg-black shrink-0 aspect-[9/16] lg:aspect-auto lg:h-auto relative group/video mx-auto lg:mx-0">
+            <video ref={videoRef} src={clipUrl} controls playsInline
+              className="w-full h-full object-contain" />
+            <div className="absolute top-3 left-3">
+              <span className="bg-black/70 text-ink font-mono text-micro uppercase px-2 py-1 rounded-full">
+                clip {Number(session?.clip_index ?? 0) + 1}
+              </span>
+            </div>
+            {clipUrl == null && <p className="absolute inset-0 flex items-center justify-center text-xs text-muted">preview unavailable</p>}
           </div>
 
-          <div className="space-y-4">
-            <h2 className="font-display lowercase text-xl text-ink">trim</h2>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="text-xs text-muted">start (s)
-                <input type="number" step="0.1" min={canonical.start} max={canonical.end} value={trimStart}
-                  onChange={(e) => { setTrimStart(e.target.value); seekTo(videoRef, e.target.value); }}
-                  className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink" />
-              </label>
-              <label className="text-xs text-muted">end (s)
-                <input type="number" step="0.1" min={canonical.start} max={canonical.end} value={trimEnd}
-                  onChange={(e) => { setTrimEnd(e.target.value); seekTo(videoRef, e.target.value); }}
-                  className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink" />
-              </label>
-            </div>
-            <div className="text-sm text-ink">duration <span className="text-brass">{fmt(trimEnd - trimStart)}</span>
-              <span className="text-muted"> · source {fmt(canonical.start)}–{fmt(canonical.end)}</span></div>
-
-            <h2 className="font-display lowercase text-xl text-ink pt-2">reframe / crop</h2>
-            <div className="grid grid-cols-3 gap-2">
-              {['auto', 'full', 'track'].map(f => (
-                <button key={f} onClick={() => setFraming(f)}
-                  className={`px-2 py-2 rounded-lg border text-xs ${framing === f ? 'border-brass text-ink bg-brass/10' : 'border-rule text-muted'}`}>
-                  {f}
-                </button>
-              ))}
-            </div>
-
-            <h2 className="font-display lowercase text-xl text-ink pt-2">title</h2>
-            <label className="block text-xs text-muted">shorts title
-              <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. The manager cancelled EVERY subscription…"
-                className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink" />
-            </label>
-
-            <h2 className="font-display lowercase text-xl text-ink pt-2">hook</h2>
-            <label className="block text-xs text-muted">hook / overlay line
-              <input type="text" value={hook} onChange={(e) => setHook(e.target.value)}
-                placeholder="e.g. Wait for the ending…"
-                className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink" />
-            </label>
-
-            <h2 className="font-display lowercase text-xl text-ink pt-2">social caption</h2>
-            <label className="block text-xs text-muted">caption for the social post (separate from the spoken subtitles below)
-              <textarea value={socialCaption} onChange={(e) => setSocialCaption(e.target.value)} rows={2}
-                placeholder="post caption with emojis + hashtags"
-                className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink resize-y" />
-            </label>
-
-            <h2 className="font-display lowercase text-xl text-ink pt-2">
-              spoken subtitles <span className={`text-xs ml-1 ${align.cls}`}>({align.text})</span>
-            </h2>
-            <label className="block text-xs text-muted">text
-              <textarea value={captionText} onChange={(e) => setCaptionText(e.target.value)} rows={2}
-                placeholder="caption text (add / delete / replace words)"
-                className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink resize-y" />
-            </label>
-            <div className="flex items-center gap-3 text-xs">
-              <button onClick={() => setCaptionText(originalCaptionText)} className="text-muted underline">reset to original</button>
-              {realigned && <span className="text-muted">changed {realigned.changedCount} · confidence {Math.round(realigned.confidence * 100)}%</span>}
-            </div>
-            {needsRealignment && (
-              <div className="text-xs text-red-300 bg-red-400/10 border border-red-400/20 rounded-lg p-2">
-                ⚠️ This edit lacks enough unchanged anchors for safe timing redistribution — audio-based realignment is required. Rerender is disabled.
+          {/* Side panel */}
+          <div className="flex-1 p-4 md:p-6 flex flex-col min-w-0">
+            <div className="mb-4">
+              <h3 className="text-base font-medium text-ink leading-tight line-clamp-2 break-words">
+                {title || 'Untitled clip'}
+              </h3>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                <span className="readout bg-paper3 px-2 py-0.5 rounded-full">{fmt(trimDurationSec)}</span>
+                <span className="readout bg-paper3 px-2 py-0.5 rounded-full">9:16</span>
+                <span className="readout bg-paper3 px-2 py-0.5 rounded-full">{framing}</span>
               </div>
-            )}
-            {realigned && !needsRealignment && realigned.blocks.length > 0 && (
-              <div className="text-xs text-muted max-h-32 overflow-y-auto space-y-0.5 border border-rule rounded-lg p-2">
-                <span className="text-ink">preview ({realigned.blocks.length} blocks):</span>
-                {realigned.blocks.slice(0, 40).map((b, i) => (
-                  <div key={i}><span className="text-brass tabular-nums">{fmt(b.startMs / 1000)}–{fmt(b.endMs / 1000)}</span> {b.text}</div>
-                ))}
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-3">
-              <label className="text-xs text-muted">position
-                <select value={captionPosition} onChange={(e) => setCaptionPosition(e.target.value)} className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink">
-                  <option value="top">top</option><option value="middle">middle</option><option value="bottom">bottom</option>
-                </select>
-              </label>
-              <label className="text-xs text-muted">style
-                <select value={captionStyle} onChange={(e) => setCaptionStyle(e.target.value)} className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink">
-                  <option value="classic">classic</option><option value="karaoke">karaoke</option>
-                </select>
-              </label>
             </div>
-            <label className="flex items-center gap-2 text-xs text-muted">
-              <input type="checkbox" checked={captionUppercase} onChange={(e) => setCaptionUppercase(e.target.checked)} /> uppercase
-            </label>
 
-            <label className="block text-xs text-muted">written instruction (captured, not yet applied — LLM edit not wired end-to-end)
-              <textarea value={instruction} onChange={(e) => setInstruction(e.target.value)} rows={2} placeholder="e.g. tighten the opening"
-                className="mt-1 w-full bg-background border border-rule rounded-lg px-3 py-2 text-ink resize-y" />
-            </label>
+            <div className="space-y-3 mb-4">
+              <label className="block">
+                <span className="eyebrow block mb-1">title</span>
+                <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
+                  placeholder="The manager cancelled EVERY subscription…"
+                  className="input-field" />
+              </label>
 
-            <button onClick={handleRerender} disabled={rerendering || !edl || needsRealignment} className="btn-primary px-4 py-2 w-full disabled:opacity-50">
-              {rerendering ? (progress?.detail || 'working…') : 'save · render · register · send re-review card'}
-            </button>
-            {progress && (
-              <div className="text-xs text-muted space-y-1">
-                {PROGRESS_ORDER.map((s) => (
-                  <div key={s} className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${progressStageRank(progress.stage) >= progressStageRank(s) ? 'bg-brass' : 'bg-rule'}`} />
-                    <span className={progressStageRank(progress.stage) >= progressStageRank(s) ? 'text-ink' : ''}>{PROGRESS_LABEL[s]}</span>
+              <label className="block">
+                <span className="eyebrow block mb-1">hook</span>
+                <input type="text" value={hook} onChange={(e) => setHook(e.target.value)}
+                  placeholder="Wait for the ending…"
+                  className="input-field" />
+              </label>
+
+              <label className="block">
+                <span className="eyebrow block mb-1">social caption</span>
+                <textarea value={socialCaption} onChange={(e) => setSocialCaption(e.target.value)} rows={2}
+                  placeholder="post caption with emojis + hashtags"
+                  className="input-field resize-y" />
+              </label>
+
+              <div>
+                <span className="eyebrow block mb-1">spoken subtitles <span className={`normal-case ${align.cls}`}>({align.text})</span></span>
+                <textarea value={captionText} onChange={(e) => setCaptionText(e.target.value)} rows={2}
+                  placeholder="spoken subtitle text"
+                  className="input-field resize-y" />
+                <div className="flex items-center gap-2 mt-1.5">
+                  <button onClick={() => setCaptionText(originalCaptionText)} className="text-xs text-muted underline hover:text-ink">reset</button>
+                  {realigned && !needsRealignment && (
+                    <span className="readout">changed {realigned.changedCount} · confidence {Math.round(realigned.confidence * 100)}%</span>
+                  )}
+                </div>
+                {needsRealignment && (
+                  <div className="mt-2 text-xs text-danger bg-[color-mix(in_oklab,var(--color-danger)_10%,transparent)] rounded-input px-3 py-2">
+                    ⚠️ This edit lacks enough unchanged anchors for safe timing redistribution — audio-based realignment is required. Rerender is disabled.
                   </div>
-                ))}
+                )}
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <select value={captionPosition} onChange={(e) => setCaptionPosition(e.target.value)} className="input-field !py-1.5">
+                    <option value="top">top</option><option value="middle">middle</option><option value="bottom">bottom</option>
+                  </select>
+                  <select value={captionStyle} onChange={(e) => setCaptionStyle(e.target.value)} className="input-field !py-1.5">
+                    <option value="classic">classic</option><option value="karaoke">karaoke</option>
+                  </select>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-muted mt-2">
+                  <input type="checkbox" checked={captionUppercase} onChange={(e) => setCaptionUppercase(e.target.checked)} /> uppercase
+                </label>
+              </div>
+
+              <div>
+                <span className="eyebrow block mb-1">trim</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-xs text-muted">start (s)
+                    <input type="number" step="0.1" value={trimStart}
+                      onChange={(e) => { setTrimStart(e.target.value); seekTo(videoRef, e.target.value); }}
+                      className="input-field mt-1" />
+                  </label>
+                  <label className="text-xs text-muted">end (s)
+                    <input type="number" step="0.1" value={trimEnd}
+                      onChange={(e) => { setTrimEnd(e.target.value); seekTo(videoRef, e.target.value); }}
+                      className="input-field mt-1" />
+                  </label>
+                </div>
+                {trimInvalid && (
+                  <p className="text-xs text-warn mt-1">start must be before end.</p>
+                )}
+              </div>
+
+              <div>
+                <span className="eyebrow block mb-1">reframe / crop</span>
+                <div className="grid grid-cols-3 gap-2">
+                  {['auto', 'full', 'track'].map(f => (
+                    <button key={f} onClick={() => setFraming(f)}
+                      className={`px-2 py-2 rounded-input border text-xs lowercase transition-colors ${framing === f ? 'border-[color:var(--color-accent)] text-ink bg-[color-mix(in_oklab,var(--color-accent)_10%,transparent)]' : 'border-rule text-muted hover:border-rule2'}`}>
+                      {f}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Progress */}
+            {progress && (
+              <div className="mb-4 grid grid-cols-4 gap-1.5">
+                {PROGRESS_ORDER.map((s) => {
+                  const active = progressStageRank(progress.stage) >= progressStageRank(s);
+                  return (
+                    <div key={s} className={`rounded-input px-2 py-1.5 text-center text-[10px] lowercase border ${active ? 'border-[color:var(--color-accent)] text-ink bg-[color-mix(in_oklab,var(--color-accent)_8%,transparent)]' : 'border-rule text-muted'}`}>
+                      {PROGRESS_LABEL[s]}
+                    </div>
+                  );
+                })}
               </div>
             )}
+
             {reauthNeeded && (
-              <div className="text-xs text-amber-300 bg-amber-400/10 border border-amber-400/20 rounded-lg p-3 space-y-2">
+              <div className="mb-4 text-xs text-amber-300 bg-amber-400/10 border border-amber-400/20 rounded-input p-3 space-y-2">
                 <p>Your editor session is no longer authorized. Your draft is preserved — reauthenticate or retry.</p>
                 <div className="flex gap-2">
                   {onReauthenticate && (
@@ -554,43 +603,63 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                 </div>
               </div>
             )}
+
             {result && (
-              <div className="text-sm text-ink bg-background border border-rule rounded-lg p-3 space-y-2">
-                <div>✓ registered as new asset version — re-review card sent</div>
-                <div className="flex flex-wrap gap-2">
-                  {downloadUrl && (
-                    <button onClick={handleDownload} className="btn-ghost px-3 py-1.5">Download edited clip</button>
-                  )}
-                  {session?.launch_guild_id && session?.launch_channel_id && (
-                    <a href={`https://discord.com/channels/${session.launch_guild_id}/${session.launch_channel_id}`}
-                       target="_blank" rel="noopener noreferrer"
-                       className="btn-ghost px-3 py-1.5 inline-flex items-center gap-1">Return to Discord Review</a>
-                  )}
-                </div>
+              <div className="mb-4 text-sm text-ink bg-background border border-rule rounded-input p-3 flex items-center gap-2">
+                <CheckCircle2 size={16} className="text-ok shrink-0" /> registered as new asset version — re-review card sent
               </div>
             )}
+
+            {/* Actions */}
+            <div className="grid grid-cols-2 gap-2 mt-auto pt-4 border-t border-rule">
+              <button onClick={handleRerender} disabled={rerendering || !edl || needsRealignment || trimInvalid}
+                className="btn-primary flex-col gap-1 py-2.5 px-1 text-[11px] leading-none rounded-input whitespace-nowrap disabled:opacity-45">
+                {rerendering ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
+                {rerendering ? (progress?.detail || 'working…') : 'auto edit'}
+              </button>
+              <button onClick={() => setCaptionUppercase(v => !v)} disabled={rerendering}
+                className="btn-quiet flex-col gap-1 py-2.5 px-1 text-[11px] leading-none rounded-input whitespace-nowrap">
+                <Type size={16} /> subtitles
+              </button>
+              <button onClick={handleDownload} disabled={!downloadUrl && !clipUrl}
+                className="btn-quiet flex-col gap-1 py-2.5 px-1 text-[11px] leading-none rounded-input whitespace-nowrap">
+                <Download size={16} /> download
+              </button>
+              {session?.launch_guild_id && session?.launch_channel_id ? (
+                <a href={`https://discord.com/channels/${session.launch_guild_id}/${session.launch_channel_id}`}
+                   target="_blank" rel="noopener noreferrer"
+                   className="btn-ghost flex-col gap-1 py-2.5 px-1 text-[11px] leading-none rounded-input whitespace-nowrap">
+                  <ArrowLeft size={16} /> return to review
+                </a>
+              ) : (
+                <span className="btn-ghost flex-col gap-1 py-2.5 px-1 text-[11px] leading-none rounded-input whitespace-nowrap opacity-45 cursor-not-allowed">
+                  <Scissors size={16} /> trim
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
-        <div className="grid md:grid-cols-2 gap-6">
-          <div className="space-y-2">
-            <h3 className="font-display lowercase text-lg text-ink">transcript</h3>
-            <div className="max-h-64 overflow-y-auto space-y-1">
+        {/* Transcript + scenes */}
+        <div className="grid md:grid-cols-2 gap-5">
+          <div className="card p-4">
+            <h3 className="eyebrow mb-2">transcript</h3>
+            <div className="max-h-56 overflow-y-auto space-y-1">
               {(words || []).slice(0, 200).map((w, i) => (
                 <button key={i} onClick={() => seekTo(videoRef, (w?.startMs ?? w?.start ?? w?.s ?? 0) / 1000)}
-                  className="block text-left text-xs text-muted hover:text-ink w-full px-2 py-1 rounded hover:bg-background">
+                  className="block text-left text-xs text-muted hover:text-ink w-full px-2 py-1 rounded hover:bg-paper3">
                   <span className="text-brass tabular-nums">{fmt((w?.startMs ?? w?.start ?? w?.s ?? 0) / 1000)}</span> {w?.text ?? w?.word ?? w?.w ?? ''}
                 </button>
               ))}
               {words.length === 0 && <p className="text-xs text-muted">(no transcript)</p>}
             </div>
           </div>
-          <div className="space-y-2">
-            <h3 className="font-display lowercase text-lg text-ink">scenes</h3>
-            <div className="max-h-64 overflow-y-auto space-y-1">
+          <div className="card p-4">
+            <h3 className="eyebrow mb-2">scenes</h3>
+            <div className="max-h-56 overflow-y-auto space-y-1">
               {(scenes || []).map((s, i) => (
                 <button key={i} onClick={() => seekTo(videoRef, s?.start ?? s?.t ?? 0)}
-                  className="block text-left text-xs text-muted hover:text-ink w-full px-2 py-1 rounded hover:bg-background">
+                  className="block text-left text-xs text-muted hover:text-ink w-full px-2 py-1 rounded hover:bg-paper3">
                   <span className="text-brass tabular-nums">{fmt(s?.start ?? s?.t ?? 0)}</span> {s?.label ?? s?.scene ?? `scene ${i + 1}`}
                 </button>
               ))}
