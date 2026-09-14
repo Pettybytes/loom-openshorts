@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { getApiUrl } from '../config';
 import { apiFetch, setEditorSessionToken, clearEditorSessionToken } from '../lib/api';
 import { realignCaptions } from '../lib/captionRealign';
-import { initDiscordActivity, isDiscordActivity, requestAuthorizationCode, authenticateWithToken } from '../lib/discordActivity';
 
 // Relative public paths: the editor is served from the same public origin as
 // the LOOM adapter (Caddy funnel), so the exchange/complete calls and the
@@ -41,7 +40,7 @@ const ALIGNMENT_LABEL = {
   realignment_required: { text: 'realignment required (audio)', cls: 'text-red-400' },
 };
 
-export default function ManualTrimEditor() {
+export default function ManualTrimEditor({ initialSession = null, activityUser = null }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -66,39 +65,26 @@ export default function ManualTrimEditor() {
 
   const videoRef = useRef(null);
 
-  // --- 0. Discord Activity (embedded) bootstrap -----------------------------------
-  // When the editor is iframed inside Discord, initialize the Embedded App SDK,
-  // obtain an OAuth authorization code, exchange it server-side (client secret
-  // stays in the adapter), and complete SDK authentication. This identifies the
-  // reviewing Discord user; the launch-token exchange below still gates the
-  // actual editor session. Outside Discord this is a no-op.
-  const [activityUser, setActivityUser] = useState(null);
+  // --- 1. Session acquisition -----------------------------------------------
+  // Two paths:
+  //   (a) Activity path: the Activity root already booted the Embedded App SDK,
+  //       completed OAuth, resolved the pending edit context, and hands us a
+  //       fully-resolved session via `initialSession`.
+  //   (b) Deep-link fallback: /edit?job_id=&clip_index=&token=*** consumes the
+  //       single-use launch token via the adapter exchange (private diagnostic
+  //       path only — never the primary Discord experience).
   useEffect(() => {
-    if (!isDiscordActivity()) return;
-    const clientId = import.meta.env.VITE_DISCORD_CLIENT_ID || '';
-    if (!clientId) return;
-    let cancelled = false;
-    (async () => {
-      const sdk = await initDiscordActivity(clientId);
-      if (!sdk || cancelled) return;
-      const code = await requestAuthorizationCode(clientId);
-      if (!code || cancelled) return;
-      try {
-        const res = await fetch('/discord/editor/oauth', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code }),
-        });
-        const data = await res.json();
-        if (cancelled || !data.ok || !data.access_token) return;
-        const auth = await authenticateWithToken(data.access_token);
-        if (!cancelled && auth) setActivityUser(auth.user);
-      } catch (_) { /* OAuth failure is non-fatal to the editor session */ }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+    if (initialSession) {
+      if (initialSession.session_token) setEditorSessionToken(initialSession.session_token);
+      setSession({
+        ...initialSession,
+        job_id: initialSession.job_id,
+        clip_index: Number(initialSession.clip_index ?? 0),
+      });
+      setLoading(false);
+      return;
+    }
 
-  // --- 1. One-time token exchange -------------------------------------------------
-  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const jobId = params.get('job_id');
     const clipIndex = params.get('clip_index');
@@ -127,7 +113,7 @@ export default function ManualTrimEditor() {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [initialSession]);
 
   // Clear the injected editor session token on unmount so a later OpenShorts
   // session in the same tab never reuses a stale editor credential.

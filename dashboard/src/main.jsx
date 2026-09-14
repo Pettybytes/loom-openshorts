@@ -10,6 +10,9 @@ import PricingPage from './components/PricingPage'
 import AccountPage from './components/AccountPage'
 import LoginModal from './components/LoginModal'
 import OAuthConsent from './components/OAuthConsent'
+import ManualTrimEditor from './components/ManualTrimEditor'
+import LoomActivityRoot from './components/LoomActivityRoot'
+import { isDiscordActivity } from './lib/discordActivity'
 
 function PageShell({ title, children }) {
   return (
@@ -69,6 +72,13 @@ function DeletedView() {
 
 function Root() {
   const resolveView = () => {
+    // Discord Activity: the Activity URL maps to the root `/`. When we are
+    // iframed inside Discord, boot the LOOM Activity root (SDK + OAuth + pending
+    // edit context) instead of the OpenShorts marketing landing page.
+    if (window.location.pathname === '/' && isDiscordActivity()) return 'activity';
+    // Editor deep-link is a PATH route (not a hash route) so the launch token
+    // is read from window.location.search and stripped immediately.
+    if (window.location.pathname.startsWith('/edit')) return 'editor';
     const hash = window.location.hash || '';
     if (hash.startsWith('#/auth/')) return 'auth';       // AuthContext consumes then redirects
     if (hash.startsWith('#/oauth/authorize')) return 'oauth';
@@ -97,6 +107,8 @@ function Root() {
   };
 
   if (view === 'legal') return <Legal />;
+  if (view === 'activity') return <LoomActivityRoot />;
+  if (view === 'editor') return <ManualTrimEditor />;
   if (view === 'pricing') return <PricingView />;
   if (view === 'account') return <AccountView />;
   if (view === 'oauth') return <OAuthConsent />;

@@ -95,3 +95,23 @@ export async function authenticateWithToken(accessToken) {
     return null;
   }
 }
+
+// Ask the LOOM adapter to resolve the pending (active) edit session bound to
+// the authenticated Discord user. The adapter derives the user id server-side
+// from the access_token (never trusts a client id). Returns the JSON body:
+//   { ok:true, pending:false }            -> generic App Launcher launch
+//   { ok:true, pending:true, session:{…}} -> clip-specific Edit launch
+// or null on transport error.
+export async function fetchPendingContext(accessToken) {
+  if (!accessToken) return null;
+  try {
+    const res = await fetch('/discord/editor/pending', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ access_token: accessToken }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
