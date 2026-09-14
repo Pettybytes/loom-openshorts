@@ -145,6 +145,14 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           if (e.framing === 'full' || e.framing === 'track') setFraming(e.framing);
         }
 
+        // Restore a previously persisted trim draft (survives Activity reload).
+        const d = session.draft;
+        if (d && d.trim_start != null && d.trim_end != null) {
+          setTrimStart(Number(d.trim_start));
+          setTrimEnd(Number(d.trim_end));
+          if (d.framing) setFraming(d.framing);
+        }
+
         const tRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/transcript`);
         if (tRes.ok) {
           const t = await tRes.json();
