@@ -8,14 +8,18 @@ import ManualTrimEditor from './ManualTrimEditor';
 //   1. Boot the Embedded App SDK (`ready()`).
 //   2. OAuth: `authorize({response_type:'code'})` → server-side code exchange →
 //      `authenticate({access_token})` → authenticated Discord user.
-//   3. Ask the adapter for the pending edit context bound to that user:
-//        - pending session  -> render the editor for the exact clip.
-//        - no pending       -> render the "choose Edit on a card" waiting screen.
+//   3. Ask the adapter for the pending edit context bound to that user. Because
+//      the adapter persists the pending session ASYNCHRONOUSLY after the type-12
+//      acknowledgement, the session may not be ready on the first probe — so we
+//      poll for a short bounded period, showing "Preparing editor…", and only
+//      fall back to the waiting screen once the bound elapses.
 //
 // No job id / clip identity / token is ever read from the URL here. Everything
 // is resolved server-side for the authenticated user.
 
 const CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID || '';
+const PENDING_POLL_INTERVAL_MS = 500;
+const PENDING_POLL_MAX_MS = 8000; // bounded: give async persistence ample time, then stop
 
 function WaitingScreen() {
   return (
@@ -34,7 +38,7 @@ function WaitingScreen() {
 }
 
 export default function LoomActivityRoot() {
-  const [state, setState] = useState('booting'); // booting | oauth | waiting | editor | error
+  const [state, setState] = useState('booting'); // booting | oauth | preparing | waiting | editor | error
   const [session, setSession] = useState(null);
   const [activityUser, setActivityUser] = useState(null);
   const [errMsg, setErrMsg] = useState('');
@@ -83,18 +87,33 @@ export default function LoomActivityRoot() {
       if (cancelled) return;
       if (auth?.user) setActivityUser(auth.user);
 
-      const pending = await fetchPendingContext(oauthData.access_token);
-      if (cancelled) return;
+      // Poll for the pending edit context (bounded). The adapter persists the
+      // session asynchronously after the type-12 ack, so it may not be ready on
+      // the first probe. Show "Preparing editor…" until it lands.
+      setState('preparing');
+      const deadline = Date.now() + PENDING_POLL_MAX_MS;
+      while (Date.now() < deadline) {
+        if (cancelled) return;
+        const pending = await fetchPendingContext(oauthData.access_token);
+        if (cancelled) return;
 
-      if (pending && pending.ok && pending.pending && pending.session) {
-        setSession(pending.session);
-        setState('editor');
-      } else if (pending && pending.ok && !pending.pending) {
-        setState('waiting');
-      } else {
-        setErrMsg(pending?.error || 'Could not resolve the pending editor session.');
-        setState('error');
+        if (pending && pending.ok && pending.pending && pending.session) {
+          setSession(pending.session);
+          setState('editor');
+          return;
+        }
+        if (pending && !pending.ok && pending.error === 'could not resolve authenticated user') {
+          // Non-transient auth failure — stop polling and surface it.
+          setErrMsg(pending.error);
+          setState('error');
+          return;
+        }
+        // pending:false (still persisting) or transient transport error — retry.
+        await new Promise((r) => setTimeout(r, PENDING_POLL_INTERVAL_MS));
       }
+
+      // Bound elapsed with no session — this is a generic App Launcher launch.
+      if (!cancelled) setState('waiting');
     }
 
     run();
@@ -105,6 +124,14 @@ export default function LoomActivityRoot() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-paper text-ink2">
         <p className="text-sm text-muted">{state === 'oauth' ? 'Authorizing with Discord…' : 'Opening LOOM editor…'}</p>
+      </div>
+    );
+  }
+
+  if (state === 'preparing') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-paper text-ink2">
+        <p className="text-sm text-muted">Preparing editor…</p>
       </div>
     );
   }
