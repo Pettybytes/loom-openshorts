@@ -3,6 +3,8 @@ import { Download, Wand2, Type, Scissors, Crosshair, ArrowLeft, Loader2, CheckCi
 import { getApiUrl } from '../config';
 import { apiFetch, setEditorSessionToken, clearEditorSessionToken, editorTokenFingerprint, getEditorSessionToken } from '../lib/api';
 import { realignCaptions } from '../lib/captionRealign';
+import SubtitleModal from './SubtitleModal';
+import HookModal from './HookModal';
 
 // Relative public paths: the editor is served from the same public origin as
 // the LOOM adapter (Caddy funnel), so the exchange/complete calls and the
@@ -94,6 +96,20 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [captionPosition, setCaptionPosition] = useState('bottom');
   const [captionStyle, setCaptionStyle] = useState('classic');
   const [captionUppercase, setCaptionUppercase] = useState(false);
+  const [captionFontName, setCaptionFontName] = useState('Verdana');
+  const [captionFontSize, setCaptionFontSize] = useState(24);
+  const [captionFontColor, setCaptionFontColor] = useState('#FFFFFF');
+  const [captionHighlightColor, setCaptionHighlightColor] = useState('#FFDD00');
+  const [captionBorderColor, setCaptionBorderColor] = useState('#000000');
+  const [captionBorderWidth, setCaptionBorderWidth] = useState(2);
+  const [captionBgColor, setCaptionBgColor] = useState('#000000');
+  const [captionBgOpacity, setCaptionBgOpacity] = useState(0.0);
+  const [captionEffect, setCaptionEffect] = useState('none');
+  const [captionBaseOpacity, setCaptionBaseOpacity] = useState(1.0);
+  const [hookPosition, setHookPosition] = useState('top');
+  const [hookSize, setHookSize] = useState('M');
+  const [hookStyle, setHookStyle] = useState('classic');
+  const [hookDuration, setHookDuration] = useState(5);
   const [instruction, setInstruction] = useState('');
   const [title, setTitle] = useState('');
   const [hook, setHook] = useState('');
@@ -102,6 +118,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [progress, setProgress] = useState(null);   // {stage, detail} or null
   const [result, setResult] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState(null);
+  const [showSubtitleModal, setShowSubtitleModal] = useState(false);
+  const [showHookModal, setShowHookModal] = useState(false);
 
   const videoRef = useRef(null);
 
@@ -130,6 +148,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     // never mistaken for "missing token".
     const retained = _resolvedSession || loadStoredEditorSession();
     if (retained) {
+      // Re-seed module memory so the autosave below merges into the FULL
+      // session (token/job/clip identity) instead of clobbering storage with
+      // {draft} only — the root cause of preview/transcript loss on reload.
+      _resolvedSession = retained;
       if (retained.session_token) setEditorSessionToken(retained.session_token);
       setSession({ ...retained, job_id: retained.job_id, clip_index: Number(retained.clip_index ?? 0) });
       setLoading(false);
@@ -191,7 +213,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     (async () => {
       try {
         const { job_id, clip_index } = session;
+        if (!job_id) throw new Error('Editor session is missing its clip identity — reopen the clip from the review card.');
+
         const stRes = await apiFetch(`/api/status/${job_id}`);
+        if (!stRes.ok) throw new Error(`Status failed (HTTP ${stRes.status})`);
         const st = await stRes.json();
         const clips = st?.result?.clips || st?.clips || [];
         const cl = clips[clip_index] || clips[0];
@@ -199,16 +224,15 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         if (rawUrl) setClipUrl(getApiUrl(rawUrl));
 
         const edlRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/edl`);
-        if (edlRes.ok) {
-          const e = await edlRes.json();
-          setEdl(e);
-          const cr = e.canonical_range || {};
-          const s = Number(cr.start ?? 0);
-          const en = Number(cr.end ?? e.source?.duration ?? 0);
-          setCanonical({ start: s, end: en });
-          setTrimStart(s); setTrimEnd(en);
-          if (e.framing === 'full' || e.framing === 'track') setFraming(e.framing);
-        }
+        if (!edlRes.ok) throw new Error(`Clip recipe failed (HTTP ${edlRes.status})`);
+        const e = await edlRes.json();
+        setEdl(e);
+        const cr = e.canonical_range || {};
+        const s = Number(cr.start ?? 0);
+        const en = Number(cr.end ?? e.source?.duration ?? 0);
+        setCanonical({ start: s, end: en });
+        setTrimStart(s); setTrimEnd(en);
+        if (e.framing === 'full' || e.framing === 'track') setFraming(e.framing);
 
         // Restore a previously persisted draft (survives reload). title/hook/
         // social caption/subtitle controls + trim + framing all persist.
@@ -225,13 +249,29 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           if (d.caption_position) setCaptionPosition(d.caption_position);
           if (d.caption_style) setCaptionStyle(d.caption_style);
           if (d.caption_uppercase != null) setCaptionUppercase(d.caption_uppercase);
+          if (d.caption_font_name) setCaptionFontName(d.caption_font_name);
+          if (d.caption_font_size != null) setCaptionFontSize(d.caption_font_size);
+          if (d.caption_font_color) setCaptionFontColor(d.caption_font_color);
+          if (d.caption_highlight_color) setCaptionHighlightColor(d.caption_highlight_color);
+          if (d.caption_border_color) setCaptionBorderColor(d.caption_border_color);
+          if (d.caption_border_width != null) setCaptionBorderWidth(d.caption_border_width);
+          if (d.caption_bg_color) setCaptionBgColor(d.caption_bg_color);
+          if (d.caption_bg_opacity != null) setCaptionBgOpacity(d.caption_bg_opacity);
+          if (d.caption_effect) setCaptionEffect(d.caption_effect);
+          if (d.caption_base_opacity != null) setCaptionBaseOpacity(d.caption_base_opacity);
+          if (d.hook_position) setHookPosition(d.hook_position);
+          if (d.hook_size) setHookSize(d.hook_size);
+          if (d.hook_style) setHookStyle(d.hook_style);
+          if (d.hook_duration != null) setHookDuration(d.hook_duration);
           if (d.instruction != null) setInstruction(d.instruction);
         }
 
         const tRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/transcript`);
         if (tRes.ok) {
           const t = await tRes.json();
-          const w = Array.isArray(t) ? t : (t?.captions || t?.words || t?.segments || []);
+          // /transcript returns {captions:[…], durationSec} (object), never a
+          // bare array — normalize defensively to the word array.
+          const w = Array.isArray(t) ? t : (Array.isArray(t?.captions) ? t.captions : (Array.isArray(t?.words) ? t.words : (Array.isArray(t?.segments) ? t.segments : [])));
           setWords(w);
           // The transcript words are CLIP-relative (0..durationSec). Record the
           // clip timeline length so caption realignment uses the clip timeline,
@@ -245,7 +285,12 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         }
 
         const scRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/scenes`);
-        if (scRes.ok) setScenes(await scRes.json());
+        if (scRes.ok) {
+          const sd = await scRes.json();
+          // /scenes returns {scenes:[…], saved_overrides, …} (object) — the
+          // .map below would otherwise throw "(scenes || []).map is not a function".
+          setScenes(Array.isArray(sd) ? sd : (Array.isArray(sd?.scenes) ? sd.scenes : []));
+        }
       } catch (e) {
         if (!cancelled) setError('Failed to load clip: ' + (e && e.message ? e.message : String(e)));
       } finally {
@@ -285,11 +330,21 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       title, hook, social_caption: socialCaption,
       caption_text: captionText, caption_position: captionPosition,
       caption_style: captionStyle, caption_uppercase: captionUppercase,
+      caption_font_name: captionFontName, caption_font_size: captionFontSize,
+      caption_font_color: captionFontColor, caption_highlight_color: captionHighlightColor,
+      caption_border_color: captionBorderColor, caption_border_width: captionBorderWidth,
+      caption_bg_color: captionBgColor, caption_bg_opacity: captionBgOpacity,
+      caption_effect: captionEffect, caption_base_opacity: captionBaseOpacity,
+      hook_position: hookPosition, hook_size: hookSize,
+      hook_style: hookStyle, hook_duration: hookDuration,
       instruction,
     };
-    // Mirror immediately into local memory so a reload restores it.
-    _resolvedSession = { ...(_resolvedSession || {}), draft };
-    storeEditorSession(_resolvedSession);
+    // Mirror immediately into local memory so a reload restores it. Merge over
+    // the FULL session (state) + any retained module session so session_token,
+    // edit_session_id, job_id and clip_index are never dropped from storage.
+    const merged = { ...session, ...(_resolvedSession || {}), draft };
+    _resolvedSession = merged;
+    storeEditorSession(merged);
     const t = setTimeout(() => {
       apiFetch('/discord/editor/draft', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -297,7 +352,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }).catch(() => {});
     }, 700);
     return () => clearTimeout(t);
-  }, [session?.edit_session_id, session?.session_token, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, instruction]);
+  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, instruction]);
 
   // --- 4. Apply caption + rerender + register + card -------------------------------
   const handleRerender = useCallback(async () => {
@@ -309,17 +364,40 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     try {
       const { job_id, clip_index } = session;
 
-      // Trim-only detection: caption text/style/position/uppercase unchanged.
+      // Changed detection across the FULL control set (text + styling).
       const captionChanged = captionText !== originalCaptionText
         || captionPosition !== 'bottom'
         || captionStyle !== 'classic'
-        || captionUppercase !== false;
+        || captionUppercase !== false
+        || captionFontName !== 'Verdana'
+        || captionFontSize !== 24
+        || captionFontColor !== '#FFFFFF'
+        || captionHighlightColor !== '#FFDD00'
+        || captionBorderColor !== '#000000'
+        || captionBorderWidth !== 2
+        || captionBgColor !== '#000000'
+        || captionBgOpacity !== 0
+        || captionEffect !== 'none'
+        || captionBaseOpacity !== 1.0;
+
+      const hookChanged = (hook || '').trim() !== ''
+        || hookPosition !== 'top' || hookSize !== 'M' || hookStyle !== 'classic' || hookDuration !== 5;
 
       const caption_changes = {
         text: captionText,
         position: captionPosition,
         style: captionStyle,
         uppercase: captionUppercase,
+        font_name: captionFontName,
+        font_size: captionFontSize,
+        font_color: captionFontColor,
+        highlight_color: captionHighlightColor,
+        border_color: captionBorderColor,
+        border_width: captionBorderWidth,
+        bg_color: captionBgColor,
+        bg_opacity: captionBgOpacity,
+        effect: captionEffect,
+        base_opacity: captionBaseOpacity,
         alignment: realigned?.alignment ?? 'preserved',
         changedCount: realigned?.changedCount ?? 0,
         confidence: realigned?.confidence ?? 1,
@@ -338,29 +416,30 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             title, hook, social_caption: socialCaption,
             caption_text: captionText, caption_position: captionPosition,
             caption_style: captionStyle, caption_uppercase: captionUppercase,
+            caption_font_name: captionFontName, caption_font_size: captionFontSize,
+            caption_font_color: captionFontColor, caption_highlight_color: captionHighlightColor,
+            caption_border_color: captionBorderColor, caption_border_width: captionBorderWidth,
+            caption_bg_color: captionBgColor, caption_bg_opacity: captionBgOpacity,
+            caption_effect: captionEffect, caption_base_opacity: captionBaseOpacity,
+            hook_position: hookPosition, hook_size: hookSize,
+            hook_style: hookStyle, hook_duration: hookDuration,
             instruction,
           },
         }),
       });
 
-      setProgress({ stage: 'render', detail: captionChanged ? 'Applying subtitles…' : 'Rendering clip…' });
-
-      let subtitleApplied = false;
-      if (captionChanged) {
-        // Caption application with redistributed word timings (no Gemini).
-        const wordsPayload = (realigned?.blocks ?? []).map(b => ({ text: b.text, startMs: b.startMs, endMs: b.endMs }));
-        const subRes = await apiFetch('/api/subtitle', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ job_id, clip_index, position: captionPosition, style: captionStyle, uppercase: captionUppercase, words: wordsPayload }),
-        });
-        subtitleApplied = subRes.ok;
-      }
-
-      // FAST rerender (trim + framing).
+      // ---- 1. Rerender trim/framing FIRST (clean base for styling) ----------
+      // Burn default captions in the recut only when we are NOT about to
+      // restyle them (a later /api/subtitle would otherwise double-burn).
+      setProgress({ stage: 'render', detail: 'Rendering trim + framing…' });
       const segments = [{ start: Number(trimStart), end: Number(trimEnd) }];
       const rrRes = await apiFetch('/api/clip/rerender', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id, clip_index, segments, snap_to_words: true, reapply_captions: true, framing: framing === 'auto' ? undefined : framing }),
+        body: JSON.stringify({
+          job_id, clip_index, segments, snap_to_words: true,
+          reapply_captions: !captionChanged,
+          framing: framing === 'auto' ? undefined : framing,
+        }),
       });
       const rrData = await rrRes.json();
       if (rrRes.status === 401) {
@@ -374,8 +453,56 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }
       if (!rrRes.ok) { setError('Rerender failed: ' + (rrData?.detail || rrData?.error || rrRes.status)); setProgress(null); setRerendering(false); return; }
 
-      const renderedUrl = rrData?.new_video_url;
-      if (renderedUrl) setDownloadUrl(getApiUrl(renderedUrl));
+      // Chain subsequent burns off the freshly recut file.
+      let currentFile = rrData?.new_video_url ? outputBasename(rrData.new_video_url) : null;
+
+      // ---- 2. Hook (if changed) ----------------------------------------------
+      let hookApplied = false;
+      if (hookChanged && currentFile) {
+        setProgress({ stage: 'render', detail: 'Applying hook…' });
+        const hookText = (hook || '').trim();
+        const hRes = await apiFetch('/api/hook', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(hookText
+            ? { job_id, clip_index, text: hookText, position: hookPosition, size: hookSize, style: hookStyle, duration_seconds: hookDuration, input_filename: currentFile }
+            : { job_id, clip_index, remove: true, input_filename: currentFile }),
+        });
+        if (hRes.ok) {
+          const hData = await hRes.json();
+          if (hData?.new_video_url) currentFile = outputBasename(hData.new_video_url);
+          hookApplied = true;
+        }
+      }
+
+      // ---- 3. Styled captions (if changed) -----------------------------------
+      let subtitleApplied = false;
+      if (captionChanged && currentFile) {
+        setProgress({ stage: 'render', detail: 'Applying subtitles…' });
+        const wordsPayload = (realigned?.blocks ?? []).map(b => ({ text: b.text, startMs: b.startMs, endMs: b.endMs }));
+        const subRes = await apiFetch('/api/subtitle', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_id, clip_index,
+            position: captionPosition, style: captionStyle, uppercase: captionUppercase,
+            font_name: captionFontName, font_size: captionFontSize,
+            font_color: captionFontColor, highlight_color: captionHighlightColor,
+            border_color: captionBorderColor, border_width: captionBorderWidth,
+            bg_color: captionBgColor, bg_opacity: captionBgOpacity,
+            effect: captionEffect, base_opacity: captionBaseOpacity,
+            words: wordsPayload, input_filename: currentFile,
+          }),
+        });
+        if (subRes.ok) {
+          const sData = await subRes.json();
+          if (sData?.new_video_url) currentFile = outputBasename(sData.new_video_url);
+          subtitleApplied = true;
+        }
+      }
+
+      const finalUrl = currentFile
+        ? getApiUrl(`/videos/${job_id}/${currentFile}`)
+        : (rrData?.new_video_url ? getApiUrl(rrData.new_video_url) : null);
+      if (finalUrl) setDownloadUrl(finalUrl);
 
       // Register the new asset version + send the re-review card.
       setProgress({ stage: 'register', detail: 'Registering new version…' });
@@ -387,8 +514,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           trim_start: Number(trimStart), trim_end: Number(trimEnd),
           caption_changes, crop_reframe_changes,
           instruction: instruction.trim() || undefined, llm_assist_used: false,
-          edl_metadata: { caption_applied: subtitleApplied, framing, segments },
-          job_id, ready_file: outputBasename(renderedUrl),
+          edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, framing, segments },
+          job_id, ready_file: currentFile || outputBasename(rrData?.new_video_url || ''),
           proposed_title: title.trim() || undefined,
           hook: hook.trim() || undefined,
           caption: socialCaption.trim() || undefined,
@@ -407,7 +534,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     } finally {
       setRerendering(false);
     }
-  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, instruction, words, realigned, needsRealignment, trimInvalid]);
+  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, instruction, realigned, needsRealignment, trimInvalid]);
 
   const handleDownload = useCallback(async () => {
     if (!downloadUrl) return;
@@ -502,12 +629,16 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                   className="input-field" />
               </label>
 
-              <label className="block">
+              <div>
                 <span className="eyebrow block mb-1">hook</span>
-                <input type="text" value={hook} onChange={(e) => setHook(e.target.value)}
-                  placeholder="Wait for the ending…"
-                  className="input-field" />
-              </label>
+                <button type="button" onClick={() => setShowHookModal(true)}
+                  className="w-full text-left input-field flex items-center justify-between gap-2">
+                  <span className="truncate">{hook.trim() ? hook : 'add a viral hook…'}</span>
+                  <span className="readout shrink-0 text-muted">
+                    {hook.trim() ? `${hookPosition} · ${hookSize} · ${hookStyle} · ${hookDuration}s` : 'tap to style'}
+                  </span>
+                </button>
+              </div>
 
               <label className="block">
                 <span className="eyebrow block mb-1">social caption</span>
@@ -617,7 +748,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                 {rerendering ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
                 {rerendering ? (progress?.detail || 'working…') : 'auto edit'}
               </button>
-              <button onClick={() => setCaptionUppercase(v => !v)} disabled={rerendering}
+              <button onClick={() => setShowSubtitleModal(true)} disabled={rerendering}
                 className="btn-quiet flex-col gap-1 py-2.5 px-1 text-[11px] leading-none rounded-input whitespace-nowrap">
                 <Type size={16} /> subtitles
               </button>
@@ -667,6 +798,57 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             </div>
           </div>
         </div>
+
+        <SubtitleModal
+          isOpen={showSubtitleModal}
+          onClose={() => setShowSubtitleModal(false)}
+          onGenerate={(styleOptions) => {
+            if (styleOptions.position) setCaptionPosition(styleOptions.position);
+            if (styleOptions.style) setCaptionStyle(styleOptions.style);
+            if (styleOptions.uppercase != null) setCaptionUppercase(styleOptions.uppercase);
+            if (styleOptions.fontName) setCaptionFontName(styleOptions.fontName);
+            if (styleOptions.fontSize != null) setCaptionFontSize(styleOptions.fontSize);
+            if (styleOptions.fontColor) setCaptionFontColor(styleOptions.fontColor);
+            if (styleOptions.highlightColor) setCaptionHighlightColor(styleOptions.highlightColor);
+            if (styleOptions.borderColor) setCaptionBorderColor(styleOptions.borderColor);
+            if (styleOptions.borderWidth != null) setCaptionBorderWidth(styleOptions.borderWidth);
+            if (styleOptions.bgColor) setCaptionBgColor(styleOptions.bgColor);
+            if (styleOptions.bgOpacity != null) setCaptionBgOpacity(styleOptions.bgOpacity);
+            if (styleOptions.effect) setCaptionEffect(styleOptions.effect);
+            if (styleOptions.baseOpacity != null) setCaptionBaseOpacity(styleOptions.baseOpacity);
+            if (Array.isArray(styleOptions.captions)) {
+              setCaptionText(styleOptions.captions.map((c) => c.text).join(' '));
+            }
+            setShowSubtitleModal(false);
+          }}
+          isProcessing={rerendering}
+          videoUrl={clipUrl}
+          jobId={session?.job_id}
+          clipIndex={Number(session?.clip_index ?? 0)}
+          existingHook={null}
+        />
+
+        <HookModal
+          isOpen={showHookModal}
+          onClose={() => setShowHookModal(false)}
+          onGenerate={(hookData) => {
+            if (hookData.text != null) setHook(hookData.text);
+            if (hookData.position) setHookPosition(hookData.position);
+            if (hookData.size) setHookSize(hookData.size);
+            if (hookData.style) setHookStyle(hookData.style);
+            const dur = hookData.remotion?.displayDurationSec;
+            if (Number.isFinite(dur)) setHookDuration(dur);
+            setShowHookModal(false);
+          }}
+          isProcessing={rerendering}
+          videoUrl={clipUrl}
+          initialText={hook}
+          durationInSeconds={clipDurationSec || 30}
+          existingSubtitles={null}
+          hasCaptions
+          serverRender
+          burnedHook={null}
+        />
       </main>
     </div>
   );
