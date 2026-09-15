@@ -14,6 +14,8 @@ const EDITOR_EXCHANGE_URL =
   import.meta.env.VITE_EDITOR_EXCHANGE_URL || '/discord/editor/exchange';
 const EDITOR_COMPLETE_URL =
   import.meta.env.VITE_EDITOR_COMPLETE_URL || '/discord/editor/complete';
+const EDITOR_BOOTSTRAP_URL =
+  import.meta.env.VITE_EDITOR_BOOTSTRAP_URL || '/discord/editor/bootstrap';
 
 function fmt(s) {
   const n = Number(s);
@@ -206,7 +208,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // session in the same tab never reuses a stale editor credential.
   useEffect(() => () => clearEditorSessionToken(), []);
 
-  // --- 2. Load clip metadata + caption words --------------------------------------
+  // --- 2. Load durable clip metadata (bootstrap) + optional live enhancement -----
   useEffect(() => {
     if (!session) return;
     let cancelled = false;
@@ -215,27 +217,112 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         const { job_id, clip_index } = session;
         if (!job_id) throw new Error('Editor session is missing its clip identity — reopen the clip from the review card.');
 
-        const stRes = await apiFetch(`/api/status/${job_id}`);
-        if (!stRes.ok) throw new Error(`Status failed (HTTP ${stRes.status})`);
-        const st = await stRes.json();
-        const clips = st?.result?.clips || st?.clips || [];
-        const cl = clips[clip_index] || clips[0];
-        const rawUrl = cl?.video_url || cl?.view_url || null;
-        if (rawUrl) setClipUrl(getApiUrl(rawUrl));
+        // --- Durable bootstrap: the REQUIRED source of truth -----------------
+        // Resolves the exact review asset from LOOM media/version records.
+        // Never depends on the transient OpenShorts /api/status runtime state,
+        // so a durable review card reopens even after the render job is evicted.
+        const bsRes = await apiFetch(EDITOR_BOOTSTRAP_URL);
+        if (!bsRes.ok) {
+          let msg = `Bootstrap failed (HTTP ${bsRes.status})`;
+          try { const b = await bsRes.json(); if (b?.detail) msg = b.detail; else if (b?.error) msg = b.error; } catch (_) { /* ignore */ }
+          throw new Error(msg);
+        }
+        const db = await bsRes.json();
 
-        const edlRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/edl`);
-        if (!edlRes.ok) throw new Error(`Clip recipe failed (HTTP ${edlRes.status})`);
-        const e = await edlRes.json();
-        setEdl(e);
-        const cr = e.canonical_range || {};
-        const s = Number(cr.start ?? 0);
-        const en = Number(cr.end ?? e.source?.duration ?? 0);
-        setCanonical({ start: s, end: en });
-        setTrimStart(s); setTrimEnd(en);
-        if (e.framing === 'full' || e.framing === 'track') setFraming(e.framing);
+        // Required durable fields — hard fail, NEVER 0:00 duration or 0/0 trim.
+        const src = db?.source_range || {};
+        const start = Number(src?.start);
+        const end = Number(src?.end);
+        const dur = Number(db?.duration_seconds);
+        if (!db?.media_url || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+          throw new Error('Durable clip data is unavailable for this asset — reopen the review card or re-render.');
+        }
 
-        // Restore a previously persisted draft (survives reload). title/hook/
-        // social caption/subtitle controls + trim + framing all persist.
+        if (db.media_url) setClipUrl(getApiUrl(db.media_url));
+        setCanonical({ start, end });
+        setTrimStart(start); setTrimEnd(end);
+        if (Number.isFinite(dur) && dur > 0) setClipDurationSec(dur);
+        if (db.framing === 'full' || db.framing === 'track') setFraming(db.framing);
+        if (db.title != null) setTitle(db.title);
+        if (db.hook != null) setHook(db.hook);
+        if (db.social_caption != null) setSocialCaption(db.social_caption);
+
+        // Spoken captions: word-level blocks from the durable correction log.
+        const capWords = Array.isArray(db.captions) ? db.captions : [];
+        if (capWords.length) {
+          setWords(capWords);
+          const joined = capWords.map(x => x?.text ?? x?.word ?? '').filter(Boolean).join(' ');
+          setOriginalCaptionText(db.caption_text || joined);
+          setCaptionText(db.caption_text || joined);
+        }
+        setScenes(Array.isArray(db.scenes) ? db.scenes : []);
+
+        // --- Optional live-job enhancement (best-effort; 404 is ignored) ----
+        // A live OpenShorts job may return a fresher preview/scenes. Never
+        // required, never the source of truth, never throws on eviction.
+        try {
+          const stRes = await apiFetch(`/api/status/${job_id}`);
+          if (stRes.ok) {
+            const st = await stRes.json();
+            const clips = st?.result?.clips || st?.clips || [];
+            const cl = clips[clip_index] || clips[0];
+            const rawUrl = cl?.video_url || cl?.view_url || null;
+            if (rawUrl) setClipUrl(getApiUrl(rawUrl));
+          }
+        } catch (_) { /* ignore */ }
+
+        try {
+          const edlRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/edl`);
+          if (edlRes.ok) {
+            const e = await edlRes.json();
+            setEdl(e);
+            const cr = e.canonical_range || {};
+            const s2 = Number(cr.start ?? 0);
+            const en2 = Number(cr.end ?? e.source?.duration ?? 0);
+            if (Number.isFinite(s2) && Number.isFinite(en2) && en2 > s2) {
+              setCanonical({ start: s2, end: en2 });
+              setTrimStart(s2); setTrimEnd(en2);
+            }
+            if (e.framing === 'full' || e.framing === 'track') setFraming(e.framing);
+          }
+        } catch (_) { /* ignore */ }
+
+        try {
+          const tRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/transcript`);
+          if (tRes.ok) {
+            const t = await tRes.json();
+            // /transcript returns {captions:[…], durationSec} (object), never a
+            // bare array — normalize defensively to the word array.
+            const w = Array.isArray(t) ? t : (Array.isArray(t?.captions) ? t.captions : (Array.isArray(t?.words) ? t.words : (Array.isArray(t?.segments) ? t.segments : [])));
+            if (w.length) {
+              setWords(w);
+              // The transcript words are CLIP-relative (0..durationSec). Record
+              // the clip timeline length so caption realignment uses the clip
+              // timeline, never the source-time trim window.
+              if (Number.isFinite(Number(t?.durationSec))) setClipDurationSec(Number(t.durationSec));
+              else if (w.length) setClipDurationSec(Math.max(...w.map(x => Number(x?.endMs ?? 0))) / 1000);
+              const joined = w.map(x => x?.text ?? x?.word ?? x?.w ?? '').filter(Boolean).join(' ');
+              setOriginalCaptionText(joined);
+              // A persisted draft caption (edited) wins over the transcript default.
+              setCaptionText(session.draft?.caption_text ?? joined);
+            }
+          }
+        } catch (_) { /* ignore */ }
+
+        try {
+          const scRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/scenes`);
+          if (scRes.ok) {
+            const sd = await scRes.json();
+            // /scenes returns {scenes:[…], saved_overrides, …} (object) — the
+            // .map below would otherwise throw "(scenes || []).map is not a function".
+            setScenes(Array.isArray(sd) ? sd : (Array.isArray(sd?.scenes) ? sd.scenes : []));
+          }
+        } catch (_) { /* ignore */ }
+
+        // Restore a previously persisted draft (survives reload). Runs LAST so
+        // the user's in-progress edits always win over both durable bootstrap
+        // defaults AND any live-job enhancement. title/hook/social caption/
+        // subtitle controls + trim + framing + caption text all persist.
         const d = session.draft;
         if (d) {
           if (d.trim_start != null && d.trim_end != null) {
@@ -246,6 +333,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           if (d.title != null) setTitle(d.title);
           if (d.hook != null) setHook(d.hook);
           if (d.social_caption != null) setSocialCaption(d.social_caption);
+          if (d.caption_text != null) setCaptionText(d.caption_text);
           if (d.caption_position) setCaptionPosition(d.caption_position);
           if (d.caption_style) setCaptionStyle(d.caption_style);
           if (d.caption_uppercase != null) setCaptionUppercase(d.caption_uppercase);
@@ -264,32 +352,6 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           if (d.hook_style) setHookStyle(d.hook_style);
           if (d.hook_duration != null) setHookDuration(d.hook_duration);
           if (d.instruction != null) setInstruction(d.instruction);
-        }
-
-        const tRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/transcript`);
-        if (tRes.ok) {
-          const t = await tRes.json();
-          // /transcript returns {captions:[…], durationSec} (object), never a
-          // bare array — normalize defensively to the word array.
-          const w = Array.isArray(t) ? t : (Array.isArray(t?.captions) ? t.captions : (Array.isArray(t?.words) ? t.words : (Array.isArray(t?.segments) ? t.segments : [])));
-          setWords(w);
-          // The transcript words are CLIP-relative (0..durationSec). Record the
-          // clip timeline length so caption realignment uses the clip timeline,
-          // never the source-time trim window.
-          if (Number.isFinite(Number(t?.durationSec))) setClipDurationSec(Number(t.durationSec));
-          else if (w.length) setClipDurationSec(Math.max(...w.map(x => Number(x?.endMs ?? 0))) / 1000);
-          const joined = w.map(x => x?.text ?? x?.word ?? x?.w ?? '').filter(Boolean).join(' ');
-          setOriginalCaptionText(joined);
-          // A persisted draft caption (edited) wins over the transcript default.
-          setCaptionText(session.draft?.caption_text ?? joined);
-        }
-
-        const scRes = await apiFetch(`/api/clip/${job_id}/${clip_index}/scenes`);
-        if (scRes.ok) {
-          const sd = await scRes.json();
-          // /scenes returns {scenes:[…], saved_overrides, …} (object) — the
-          // .map below would otherwise throw "(scenes || []).map is not a function".
-          setScenes(Array.isArray(sd) ? sd : (Array.isArray(sd?.scenes) ? sd.scenes : []));
         }
       } catch (e) {
         if (!cancelled) setError('Failed to load clip: ' + (e && e.message ? e.message : String(e)));
