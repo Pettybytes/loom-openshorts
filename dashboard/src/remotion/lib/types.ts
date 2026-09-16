@@ -69,6 +69,23 @@ export interface EffectsConfig {
   segments: EffectSegment[];
 }
 
+// --- On-video title/header overlay (separate from the metadata Shorts title) ---
+export type TitleOverlayPosition = "top" | "upper";
+export type TitleOverlayAlignment = "left" | "center" | "right";
+export type TitleOverlayBackground = "none" | "box" | "highlight";
+
+export interface TitleOverlayConfig {
+  enabled: boolean;
+  text: string;
+  position: TitleOverlayPosition;
+  fontFamily: string;
+  fontSize: number;
+  textColor: string;
+  background: TitleOverlayBackground;
+  backgroundColor: string;
+  alignment: TitleOverlayAlignment;
+}
+
 // --- Main composition props ---
 export interface ShortVideoProps {
   videoUrl: string;
@@ -79,6 +96,7 @@ export interface ShortVideoProps {
   subtitles: SubtitleConfig | null;
   hook: HookConfig | null;
   effects: EffectsConfig | null;
+  titleOverlay: TitleOverlayConfig | null;
 }
 
 // --- Zod schemas for validation (used by render service) ---
@@ -132,6 +150,18 @@ export const effectsConfigSchema = z.object({
   segments: z.array(effectSegmentSchema),
 });
 
+export const titleOverlayConfigSchema = z.object({
+  enabled: z.boolean(),
+  text: z.string(),
+  position: z.enum(["top", "upper"]),
+  fontFamily: z.string(),
+  fontSize: z.number().positive(),
+  textColor: z.string(),
+  background: z.enum(["none", "box", "highlight"]),
+  backgroundColor: z.string(),
+  alignment: z.enum(["left", "center", "right"]),
+});
+
 export const shortVideoPropsSchema = z.object({
   videoUrl: z.string(),
   durationInFrames: z.number().int().positive(),
@@ -141,4 +171,5 @@ export const shortVideoPropsSchema = z.object({
   subtitles: subtitleConfigSchema.nullable(),
   hook: hookConfigSchema.nullable(),
   effects: effectsConfigSchema.nullable(),
+  titleOverlay: titleOverlayConfigSchema.nullable(),
 });

@@ -12,6 +12,7 @@ import { ShortVideo } from '../remotion/compositions/ShortVideo';
  * @param {object|null} props.subtitles - SubtitleConfig or null
  * @param {object|null} props.hook - HookConfig or null
  * @param {object|null} props.effects - EffectsConfig or null
+ * @param {object|null} props.titleOverlay - TitleOverlayConfig or null
  * @param {string} [props.className] - Additional CSS classes
  */
 export default function RemotionPreview({
@@ -20,6 +21,7 @@ export default function RemotionPreview({
     subtitles = null,
     hook = null,
     effects = null,
+    titleOverlay = null,
     className = '',
 }) {
     const fps = 30;
@@ -35,8 +37,9 @@ export default function RemotionPreview({
             subtitles,
             hook,
             effects,
+            titleOverlay,
         }),
-        [videoUrl, durationInFrames, subtitles, hook, effects]
+        [videoUrl, durationInFrames, subtitles, hook, effects, titleOverlay]
     );
 
     return (

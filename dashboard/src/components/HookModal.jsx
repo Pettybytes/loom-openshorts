@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
 import RemotionPreview from './RemotionPreview';
 import Modal from './ui/Modal';
@@ -39,16 +39,32 @@ function loadHookPrefs() {
     try { return JSON.parse(localStorage.getItem('os_hook_prefs')) || {}; } catch { return {}; }
 }
 
-export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook }) {
+export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, cleanVideoUrl, initialText, initialPosition, initialSize, initialStyle, initialDuration, durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook }) {
     const prefs = loadHookPrefs();
     const [text, setText] = useState(initialText || 'POV: You are using the viral hook feature');
-    const [position, setPosition] = useState(prefs.position || 'top');
-    const [size, setSize] = useState(prefs.size || 'M');
-    const [style, setStyle] = useState(prefs.style || 'classic');
+    const [position, setPosition] = useState(initialPosition || prefs.position || 'top');
+    const [size, setSize] = useState(initialSize || prefs.size || 'M');
+    const [style, setStyle] = useState(initialStyle || prefs.style || 'classic');
     const [entranceAnimation, setEntranceAnimation] = useState(prefs.entranceAnimation || 'spring');
-    const [displayDuration, setDisplayDuration] = useState(5);
+    const [displayDuration, setDisplayDuration] = useState(initialDuration || 5);
+
+    // Hydrate the CURRENT hook whenever the modal opens (or its source hook
+    // changes) so the user edits the existing burned hook rather than starting
+    // from unrelated/default text. Runs on every open, not just first mount.
+    useEffect(() => {
+      if (!isOpen) return;
+      setText(initialText || 'POV: You are using the viral hook feature');
+      setPosition(initialPosition || prefs.position || 'top');
+      setSize(initialSize || prefs.size || 'M');
+      setStyle(initialStyle || prefs.style || 'classic');
+      setDisplayDuration(initialDuration || 5);
+    }, [isOpen, initialText, initialPosition, initialSize, initialStyle, initialDuration]);
 
     if (!isOpen) return null;
+
+    // When the clip already has a burned hook, preview the new hook over the
+    // CLEAN source (no burned hook underneath) — replacement, never stacking.
+    const previewVideoUrl = cleanVideoUrl || videoUrl;
 
     // Build hook config for Remotion preview
     const hookConfig = {
@@ -60,7 +76,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
         displayDurationSec: displayDuration,
     };
 
-    const useRemotionPreview = !!videoUrl;
+    const useRemotionPreview = !!previewVideoUrl;
 
     // Fallback preview logic (same as original)
     const getPositionClass = () => {
@@ -86,14 +102,14 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                 <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
                     {useRemotionPreview ? (
                         <RemotionPreview
-                            videoUrl={videoUrl}
+                            videoUrl={previewVideoUrl}
                             durationInSeconds={durationInSeconds || 30}
                             hook={hookConfig}
                             subtitles={existingSubtitles || null}
                         />
                     ) : (
                         <>
-                            <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
+                            <video src={previewVideoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
                             <div className={`absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col h-full ${getPositionClass()}`}>
                                 <div
                                     className="text-black font-bold px-3 py-2 rounded-xl shadow-2xl text-center whitespace-pre-wrap transition-all duration-200"

@@ -45,12 +45,16 @@ const ALIGNMENT_LABEL = {
   realignment_required: { text: 'realignment required (audio)', cls: 'text-red-400' },
 };
 
-const PROGRESS_ORDER = ['save', 'render', 'register', 'card'];
+const PROGRESS_ORDER = ['save', 'clean', 'render', 'hook', 'subtitle', 'register', 'card', 'complete'];
 const PROGRESS_LABEL = {
-  save: 'draft saved',
-  render: 'rendered',
-  register: 'registered',
-  card: 're-review card sent',
+  save: 'saving draft',
+  clean: 'preparing clean source',
+  render: 'rendering trim/reframe',
+  hook: 'applying hook',
+  subtitle: 'applying subtitles',
+  register: 'registering version',
+  card: 'sending card',
+  complete: 'complete',
 };
 
 // --- External HTTPS /edit bootstrap -------------------------------------
@@ -116,6 +120,18 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [title, setTitle] = useState('');
   const [hook, setHook] = useState('');
   const [socialCaption, setSocialCaption] = useState('');
+  const [cleanSourceUrl, setCleanSourceUrl] = useState(null);
+  const [hasBurnedHook, setHasBurnedHook] = useState(false);
+  // On-video title/header overlay — DISTINCT from the metadata Shorts title.
+  const [titleOverlayEnabled, setTitleOverlayEnabled] = useState(false);
+  const [titleOverlayText, setTitleOverlayText] = useState('');
+  const [titleOverlayPosition, setTitleOverlayPosition] = useState('top');
+  const [titleOverlayFontFamily, setTitleOverlayFontFamily] = useState('Verdana');
+  const [titleOverlayFontSize, setTitleOverlayFontSize] = useState(40);
+  const [titleOverlayColor, setTitleOverlayColor] = useState('#FFFFFF');
+  const [titleOverlayBackground, setTitleOverlayBackground] = useState('box');
+  const [titleOverlayBackgroundColor, setTitleOverlayBackgroundColor] = useState('#000000');
+  const [titleOverlayAlignment, setTitleOverlayAlignment] = useState('center');
   const [rerendering, setRerendering] = useState(false);
   const [progress, setProgress] = useState(null);   // {stage, detail} or null
   const [result, setResult] = useState(null);
@@ -239,6 +255,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         }
 
         if (db.media_url) setClipUrl(getApiUrl(db.media_url));
+        if (db.clean_source_url) setCleanSourceUrl(getApiUrl(db.clean_source_url));
+        setHasBurnedHook(!!db.has_burned_hook);
         setCanonical({ start, end });
         setTrimStart(start); setTrimEnd(end);
         if (Number.isFinite(dur) && dur > 0) setClipDurationSec(dur);
@@ -246,6 +264,33 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         if (db.title != null) setTitle(db.title);
         if (db.hook != null) setHook(db.hook);
         if (db.social_caption != null) setSocialCaption(db.social_caption);
+
+        // Durable recipe: synthesize the `edl` the Auto Edit flow needs from
+        // the bootstrap, so Auto Edit stays enabled even after the render job
+        // is evicted (the live /api/clip/.../edl 404s then). This is the root
+        // cause of the previous "Auto Edit did nothing" no-op: `edl` was only
+        // ever set from the live endpoint.
+        setEdl({
+          canonical_range: { start, end },
+          source: { duration: dur },
+          framing: db.framing || 'auto',
+          durable: true,
+        });
+
+        // Restore a persisted title/header overlay from the durable draft (if any).
+        const d0 = session.draft;
+        if (d0?.title_overlay) {
+          const to = d0.title_overlay;
+          if (to.enabled != null) setTitleOverlayEnabled(!!to.enabled);
+          if (to.text != null) setTitleOverlayText(to.text);
+          if (to.position) setTitleOverlayPosition(to.position);
+          if (to.font_family) setTitleOverlayFontFamily(to.font_family);
+          if (to.font_size != null) setTitleOverlayFontSize(Number(to.font_size));
+          if (to.text_color) setTitleOverlayColor(to.text_color);
+          if (to.background) setTitleOverlayBackground(to.background);
+          if (to.background_color) setTitleOverlayBackgroundColor(to.background_color);
+          if (to.alignment) setTitleOverlayAlignment(to.alignment);
+        }
 
         // Spoken captions: word-level blocks from the durable correction log.
         const capWords = Array.isArray(db.captions) ? db.captions : [];
@@ -399,6 +444,17 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       caption_effect: captionEffect, caption_base_opacity: captionBaseOpacity,
       hook_position: hookPosition, hook_size: hookSize,
       hook_style: hookStyle, hook_duration: hookDuration,
+      title_overlay: {
+        enabled: titleOverlayEnabled,
+        text: titleOverlayText,
+        position: titleOverlayPosition,
+        font_family: titleOverlayFontFamily,
+        font_size: titleOverlayFontSize,
+        text_color: titleOverlayColor,
+        background: titleOverlayBackground,
+        background_color: titleOverlayBackgroundColor,
+        alignment: titleOverlayAlignment,
+      },
       instruction,
     };
     // Mirror immediately into local memory so a reload restores it. Merge over
@@ -414,11 +470,12 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }).catch(() => {});
     }, 700);
     return () => clearTimeout(t);
-  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, instruction]);
+  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, instruction]);
 
   // --- 4. Apply caption + rerender + register + card -------------------------------
   const handleRerender = useCallback(async () => {
-    if (!session || !edl) return;
+    if (!session) { setError('Editor session is missing — reopen the clip from the review card.'); return; }
+    if (!edl) { setError('Clip recipe is unavailable — the render job may have expired. Reopen the review card to retry.'); return; }
     if (needsRealignment) { setError('Caption edit requires audio realignment — not rerendering.'); return; }
     if (trimInvalid) { setError('Trim range is invalid (start must be before end).'); return; }
     setRerendering(true); setResult(null); setError(null); setReauthNeeded(false);
@@ -490,7 +547,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         }),
       });
 
-      // ---- 1. Rerender trim/framing FIRST (clean base for styling) ----------
+      // ---- 1. Prepare clean source ----------------------------------------
+      setProgress({ stage: 'clean', detail: 'Preparing clean source…' });
+
+      // ---- 2. Rerender trim/framing FIRST (clean base for styling) ----------
       // Burn default captions in the recut only when we are NOT about to
       // restyle them (a later /api/subtitle would otherwise double-burn).
       setProgress({ stage: 'render', detail: 'Rendering trim + framing…' });
@@ -518,10 +578,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       // Chain subsequent burns off the freshly recut file.
       let currentFile = rrData?.new_video_url ? outputBasename(rrData.new_video_url) : null;
 
-      // ---- 2. Hook (if changed) ----------------------------------------------
+      // ---- 3. Hook (if changed) ----------------------------------------------
       let hookApplied = false;
       if (hookChanged && currentFile) {
-        setProgress({ stage: 'render', detail: 'Applying hook…' });
+        setProgress({ stage: 'hook', detail: 'Applying hook…' });
         const hookText = (hook || '').trim();
         const hRes = await apiFetch('/api/hook', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -536,10 +596,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         }
       }
 
-      // ---- 3. Styled captions (if changed) -----------------------------------
+      // ---- 4. Styled captions (if changed) -----------------------------------
       let subtitleApplied = false;
       if (captionChanged && currentFile) {
-        setProgress({ stage: 'render', detail: 'Applying subtitles…' });
+        setProgress({ stage: 'subtitle', detail: 'Applying subtitles…' });
         const wordsPayload = (realigned?.blocks ?? []).map(b => ({ text: b.text, startMs: b.startMs, endMs: b.endMs }));
         const subRes = await apiFetch('/api/subtitle', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -576,7 +636,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           trim_start: Number(trimStart), trim_end: Number(trimEnd),
           caption_changes, crop_reframe_changes,
           instruction: instruction.trim() || undefined, llm_assist_used: false,
-          edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, framing, segments },
+          edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, framing, segments, title_overlay: titleOverlayEnabled && titleOverlayText.trim() ? {
+            text: titleOverlayText.trim(), position: titleOverlayPosition, font_family: titleOverlayFontFamily,
+            font_size: titleOverlayFontSize, text_color: titleOverlayColor, background: titleOverlayBackground,
+            background_color: titleOverlayBackgroundColor, alignment: titleOverlayAlignment,
+          } : null },
           job_id, ready_file: currentFile || outputBasename(rrData?.new_video_url || ''),
           proposed_title: title.trim() || undefined,
           hook: hook.trim() || undefined,
@@ -590,6 +654,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       clearStoredEditorSession(); _resolvedSession = null;
       setResult(completeData);
       setProgress({ stage: 'card', detail: null });
+      setProgress({ stage: 'complete', detail: null });
     } catch (e) {
       setError('Rerender error: ' + (e && e.message ? e.message : String(e)));
       setProgress(null);
@@ -667,6 +732,32 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                 clip {Number(session?.clip_index ?? 0) + 1}
               </span>
             </div>
+            {titleOverlayEnabled && titleOverlayText.trim() && (
+              <div
+                className="absolute left-0 right-0 flex pointer-events-none"
+                style={{
+                  top: titleOverlayPosition === 'upper' ? '6%' : '14%',
+                  paddingLeft: '8%',
+                  paddingRight: '8%',
+                  justifyContent: titleOverlayAlignment === 'left' ? 'flex-start' : titleOverlayAlignment === 'right' ? 'flex-end' : 'center',
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: titleOverlayFontFamily,
+                    fontSize: `${titleOverlayFontSize * 0.4}px`,
+                    fontWeight: 700,
+                    color: titleOverlayColor,
+                    backgroundColor: titleOverlayBackground === 'none' ? 'transparent' : titleOverlayBackgroundColor,
+                    padding: titleOverlayBackground === 'none' ? 0 : '4px 10px',
+                    borderRadius: titleOverlayBackground === 'none' ? 0 : 6,
+                    textAlign: titleOverlayAlignment,
+                  }}
+                >
+                  {titleOverlayText}
+                </span>
+              </div>
+            )}
             {clipUrl == null && <p className="absolute inset-0 flex items-center justify-center text-xs text-muted">preview unavailable</p>}
           </div>
 
@@ -690,6 +781,64 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                   placeholder="The manager cancelled EVERY subscription…"
                   className="input-field" />
               </label>
+
+              {/* On-video title/header overlay — DISTINCT from the metadata title */}
+              <div className="border border-rule rounded-input p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="eyebrow">on-video title / header</span>
+                  <label className="flex items-center gap-1.5 text-xs text-muted">
+                    <input type="checkbox" checked={titleOverlayEnabled} onChange={(e) => setTitleOverlayEnabled(e.target.checked)} /> enabled
+                  </label>
+                </div>
+                {titleOverlayEnabled && (
+                  <>
+                    <input type="text" value={titleOverlayText} onChange={(e) => setTitleOverlayText(e.target.value)}
+                      placeholder="Text overlaid in the top black region"
+                      className="input-field" />
+                    <div className="grid grid-cols-2 gap-2">
+                      <select value={titleOverlayPosition} onChange={(e) => setTitleOverlayPosition(e.target.value)} className="input-field !py-1.5">
+                        <option value="top">top region</option>
+                        <option value="upper">upper edge</option>
+                      </select>
+                      <select value={titleOverlayAlignment} onChange={(e) => setTitleOverlayAlignment(e.target.value)} className="input-field !py-1.5">
+                        <option value="left">left</option>
+                        <option value="center">center</option>
+                        <option value="right">right</option>
+                      </select>
+                      <select value={titleOverlayFontFamily} onChange={(e) => setTitleOverlayFontFamily(e.target.value)} className="input-field !py-1.5">
+                        <option value="Verdana">Verdana</option>
+                        <option value="Arial">Arial</option>
+                        <option value="Impact">Impact</option>
+                        <option value="Helvetica">Helvetica</option>
+                        <option value="Georgia">Georgia</option>
+                        <option value="Courier New">Courier New</option>
+                      </select>
+                      <select value={titleOverlayBackground} onChange={(e) => setTitleOverlayBackground(e.target.value)} className="input-field !py-1.5">
+                        <option value="none">no background</option>
+                        <option value="box">box</option>
+                        <option value="highlight">highlight</option>
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <label className="text-xs text-muted">size (px)
+                        <input type="number" min="12" max="160" value={titleOverlayFontSize}
+                          onChange={(e) => setTitleOverlayFontSize(Number(e.target.value))}
+                          className="input-field mt-1" />
+                      </label>
+                      <label className="text-xs text-muted">text color
+                        <input type="color" value={titleOverlayColor}
+                          onChange={(e) => setTitleOverlayColor(e.target.value)}
+                          className="input-field mt-1 h-9" />
+                      </label>
+                      <label className="text-xs text-muted">bg color
+                        <input type="color" value={titleOverlayBackgroundColor}
+                          onChange={(e) => setTitleOverlayBackgroundColor(e.target.value)}
+                          className="input-field mt-1 h-9" />
+                      </label>
+                    </div>
+                  </>
+                )}
+              </div>
 
               <div>
                 <span className="eyebrow block mb-1">hook</span>
@@ -904,12 +1053,17 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           }}
           isProcessing={rerendering}
           videoUrl={clipUrl}
+          cleanVideoUrl={cleanSourceUrl}
           initialText={hook}
+          initialPosition={hookPosition}
+          initialSize={hookSize}
+          initialStyle={hookStyle}
+          initialDuration={hookDuration}
           durationInSeconds={clipDurationSec || 30}
           existingSubtitles={null}
           hasCaptions
           serverRender
-          burnedHook={null}
+          burnedHook={hasBurnedHook ? hook : null}
         />
       </main>
     </div>

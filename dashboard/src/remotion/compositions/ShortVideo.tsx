@@ -4,6 +4,7 @@ import { Video } from "@remotion/media";
 import type { ShortVideoProps } from "../lib/types";
 import { Subtitles } from "./Subtitles";
 import { HookOverlay } from "./HookOverlay";
+import { TitleOverlay } from "./TitleOverlay";
 import { VideoEffects } from "./VideoEffects";
 
 /**
@@ -11,7 +12,7 @@ import { VideoEffects } from "./VideoEffects";
  * Uses @remotion/media Video for browser-side rendering compatibility.
  */
 export const ShortVideo: React.FC<Record<string, unknown>> = (rawProps) => {
-  const { videoUrl, subtitles, hook, effects } =
+  const { videoUrl, subtitles, hook, effects, titleOverlay } =
     rawProps as unknown as ShortVideoProps;
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
@@ -26,7 +27,10 @@ export const ShortVideo: React.FC<Record<string, unknown>> = (rawProps) => {
       {/* Layer 2: Animated subtitles */}
       {subtitles && <Subtitles config={subtitles} />}
 
-      {/* Layer 3: Hook text overlay */}
+      {/* Layer 3: On-video title/header overlay (distinct from metadata title) */}
+      {titleOverlay && <TitleOverlay config={titleOverlay} />}
+
+      {/* Layer 4: Hook text overlay */}
       {hook && <HookOverlay config={hook} />}
     </AbsoluteFill>
   );
