@@ -1,27 +1,34 @@
 import React from 'react';
 import {
-    applyRangeStyle,
     normalizeRich,
-    normalizeBase,
     SIZE_SCALE,
     RICH_FONTS,
 } from '../lib/richText';
+import {
+    applySelectionPatch,
+    clearSelectionStyle,
+    styleAtSelection,
+    hasRange,
+} from '../lib/rangeSelection';
 
 /**
  * RangeStyleControls — the ONE range-styling UI, shared by the Hook modal and
- * the Header modal.
+ * the Header modal, so both elements expose the identical interaction from one
+ * implementation.
  *
- * Both elements therefore expose the same interaction (select text → style just
- * that range) from the same implementation, instead of two look-alike panels
- * that drift apart. The only difference is how a size is *offered*:
+ * FOCUS DISCIPLINE (this is what made Header selection fail):
+ * a swatch/clear button must not steal focus from the textarea. Focus loss makes
+ * browsers report an empty selection, and a naive re-sync then wipes the live
+ * range and silently redirects the patch to the base style. So:
+ *   - action buttons call preventDefault() on mousedown, keeping the caret alive;
+ *   - the modal hands us a STICKY selection (an empty reading cannot clear it);
+ *   - selects/inputs are left alone, since preventDefault would break the
+ *     dropdown and the sticky selection already covers them.
  *
- *   sizeMode="token" — the Hook offers S/M/L (its existing vocabulary)
- *   sizeMode="px"    — the Header offers px targets, relative to its base size
- *
- * Both store the SAME thing: a multiplier of the element's base font size.
- * Sizes are only meaningful for a selection, so with nothing selected the colour
- * and font controls set the base style and the size control is disabled — an
- * element's base size keeps living in its own dedicated control, never here.
+ * `sizeMode` only changes how a size is OFFERED (the Hook's S/M/L vs the
+ * Header's px targets); both store a multiplier of the element's base size.
+ * Size is meaningless without a range, so it is disabled until text is selected.
+ * An element's base size keeps living in its own dedicated control.
  */
 export default function RangeStyleControls({
     text,
@@ -33,56 +40,40 @@ export default function RangeStyleControls({
     hint,
 }) {
     const value = normalizeRich(rich);
+    const textLength = (text || '').length;
     const hasText = (text || '').trim().length > 0;
-    const hasSelection = hasText && selection.end > selection.start;
-    const selectedText = hasSelection ? text.slice(selection.start, selection.end) : '';
+    const selected = hasRange(selection, textLength);
+    const selectedText = selected ? text.slice(selection.start, selection.end) : '';
     const disabled = !hasText;
 
     const applyPatch = (patch) => {
         if (!hasText) return;
-        if (hasSelection) {
-            onChange(applyRangeStyle(value, selection.start, selection.end, patch), { scope: 'range' });
-            return;
-        }
-        // No selection: colour/font are the only honest things to set, and they
-        // become the element's base style. A size patch would have no range to
-        // apply to, so it is ignored rather than silently applying to everything.
-        const nextBase = normalizeBase(value.base);
-        for (const key of ['color', 'font']) {
-            if (!(key in patch)) continue;
-            const v = patch[key];
-            nextBase[key] = v == null || v === '' ? null : v;
-        }
-        onChange({ text: value.text, base: nextBase, spans: value.spans }, { scope: 'base' });
+        const result = applySelectionPatch(value, selection, patch, { textLength });
+        onChange(result.value, { scope: result.scope });
     };
 
     const clearRange = () => {
-        if (hasSelection) {
-            onChange(
-                applyRangeStyle(value, selection.start, selection.end, { color: null, font: null, size: null }),
-                { scope: 'range' },
-            );
-            return;
-        }
-        onChange({ text: value.text, base: { color: null, font: null }, spans: value.spans }, { scope: 'base' });
+        if (!hasText) return;
+        const result = clearSelectionStyle(value, selection, { textLength });
+        onChange(result.value, { scope: result.scope });
     };
 
-    // Current effective style at the selection start, for honest readouts.
-    const activeRun = hasSelection
-        ? value.spans.find((s) => selection.start >= s.start && selection.start < s.end)
-        : null;
+    const activeRun = styleAtSelection(value, selection, { textLength });
     const currentSize = activeRun?.size ?? null;
     const currentPx = currentSize ? Math.round(baseFontPx * currentSize) : null;
     const tokenFor = (multiplier) =>
         Object.keys(SIZE_SCALE).find((k) => SIZE_SCALE[k] === multiplier) || null;
 
+    // Buttons must not blur the textarea — that is the whole ballgame.
+    const holdFocus = (e) => e.preventDefault();
+
     return (
         <div className="border border-rule rounded-input p-3 space-y-3">
             <div>
                 <p className="eyebrow mb-1">selected range</p>
-                <p className="text-[11px] text-muted break-words">
-                    {hasSelection ? <span className="text-ink">“{selectedText}”</span> : null}{' '}
-                    {hasSelection
+                <p className="text-[11px] text-muted break-words" data-testid="selected-range-readout">
+                    {selected ? <span className="text-ink">“{selectedText}”</span> : null}{' '}
+                    {selected
                         ? `${selectedText.length} char${selectedText.length === 1 ? '' : 's'} · ${selection.start}–${selection.end}`
                         : 'no selection — controls set the base style'}
                 </p>
@@ -96,6 +87,7 @@ export default function RangeStyleControls({
                             key={c}
                             type="button"
                             disabled={disabled}
+                            onMouseDown={holdFocus}
                             onClick={() => applyPatch({ color: c })}
                             title={`colour ${c} for the selection`}
                             className="w-7 h-7 rounded border border-rule2 hover:border-[color:var(--color-accent)] disabled:opacity-40"
@@ -117,11 +109,11 @@ export default function RangeStyleControls({
                 <label className="text-[11px] text-muted">Range font
                     <select
                         disabled={disabled}
-                        value={activeRun?.font || (hasSelection ? '' : (value.base.font || ''))}
+                        value={activeRun?.font || (selected ? '' : (value.base.font || ''))}
                         onChange={(e) => applyPatch({ font: e.target.value || null })}
                         className="input-field !py-1.5 mt-1"
                     >
-                        <option value="">{hasSelection ? 'keep / inherit' : 'default'}</option>
+                        <option value="">{selected ? 'keep / inherit' : 'default'}</option>
                         {RICH_FONTS.map((f) => <option key={f} value={f}>{f}</option>)}
                     </select>
                 </label>
@@ -133,9 +125,12 @@ export default function RangeStyleControls({
                             type="number"
                             min="8"
                             max="320"
-                            disabled={disabled || !hasSelection}
+                            // Enabled as soon as there is text, so a size can be
+                            // typed after selecting; the patch still only lands on
+                            // a real range.
+                            disabled={disabled || !selected}
                             value={currentPx ?? ''}
-                            placeholder={hasSelection ? String(baseFontPx) : 'select text'}
+                            placeholder={selected ? String(baseFontPx) : 'select text'}
                             onChange={(e) => {
                                 const px = Number(e.target.value);
                                 if (!Number.isFinite(px) || px <= 0) return;
@@ -145,15 +140,15 @@ export default function RangeStyleControls({
                         />
                     ) : (
                         <select
-                            disabled={disabled || !hasSelection}
+                            disabled={disabled || !selected}
                             value={tokenFor(currentSize) || ''}
                             onChange={(e) => {
-                                const token = e.target.value;
-                                applyPatch({ size: token ? SIZE_SCALE[token] : null });
+                                const sizeKey = e.target.value || null;
+                                applyPatch({ size: sizeKey ? SIZE_SCALE[sizeKey] : null });
                             }}
                             className="input-field !py-1.5 mt-1"
                         >
-                            <option value="">{hasSelection ? 'keep / inherit' : 'select text'}</option>
+                            <option value="">{selected ? 'keep / inherit' : 'select text'}</option>
                             {Object.keys(SIZE_SCALE).map((k) => (
                                 <option key={k} value={k}>{k} (×{SIZE_SCALE[k]})</option>
                             ))}
@@ -165,17 +160,18 @@ export default function RangeStyleControls({
                 </label>
             </div>
 
-            {hasSelection && currentPx ? (
+            {selected && currentPx ? (
                 <p className="readout">this range renders at ≈{currentPx}px (base {Math.round(baseFontPx)}px)</p>
             ) : null}
 
             <button
                 type="button"
+                onMouseDown={holdFocus}
                 onClick={clearRange}
                 disabled={disabled}
                 className="text-xs text-muted underline underline-offset-2 hover:text-ink disabled:opacity-40"
             >
-                {hasSelection ? 'clear styling on selection' : 'clear base styling'}
+                {selected ? 'clear styling on selection' : 'clear base styling'}
             </button>
 
             {hint ? <p className="text-[11px] text-muted leading-relaxed">{hint}</p> : null}

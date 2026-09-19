@@ -3,22 +3,32 @@ import Modal from './ui/Modal';
 import TextOverlayPreview from './TextOverlayPreview';
 import RangeStyleControls from './RangeStyleControls';
 import { normalizeRich, buildRuns } from '../lib/richText';
+import { keepSelection, normalizeSelection } from '../lib/rangeSelection';
+import { headerBand } from '../lib/overlayLayout';
 
 /**
  * HeaderModal — edits CONCEPT B (the on-video Header) and nothing else.
  *
- * This is the SAME interaction model already proven for the Hook: select text,
- * style just that range. It reuses RangeStyleControls and renders the shared
- * TextOverlayPreview, so a range styled here appears identically in the primary
- * preview — and cannot disagree with it, because both render the same model.
+ * Same interaction model as the Hook: select text, style just that range.
+ * It reuses RangeStyleControls and renders the shared TextOverlayPreview, so a
+ * range styled here appears identically in the primary preview.
  *
- * Clip Title and Social Caption are deliberately absent: they are metadata and
- * are never drawn on the video.
+ * SELECTION DISCIPLINE — three things were wrong before and are fixed here:
+ *   1. `onBlur` re-synced the selection from a textarea that had just lost
+ *      focus. WebKit reports 0/0 there, so the live range was wiped and the
+ *      patch fell through to the BASE style: the whole header changed colour and
+ *      the panel said "no selection". There is no blur sync any more.
+ *   2. The selection is STICKY (`keepSelection`): an empty reading can never
+ *      overwrite a real range, whatever the browser reports.
+ *   3. A selection made in the editor's inline header field is carried in as
+ *      `initialSelection`, so the interaction works from either entry point.
+ *
+ * Clip Title and Social Caption are deliberately absent: metadata, never drawn.
  */
 export default function HeaderModal({
     isOpen, onClose, onApply,
     videoUrl,
-    initialText, initialRich,
+    initialText, initialRich, initialSelection,
     initialPosition, initialAlignment,
     initialFontFamily, initialFontSize, initialColor,
     initialBackground, initialBackgroundColor,
@@ -36,18 +46,23 @@ export default function HeaderModal({
     const textareaRef = useRef(null);
 
     // Hydrate the CURRENT header whenever the modal opens (or its source
-    // changes) so the user edits the existing header, not a blank one.
+    // changes). Never wipes a range: the base and spans come from the saved
+    // record, and the selection is seeded from wherever the user last selected.
     useEffect(() => {
         if (!isOpen) return;
-        setText(initialText || '');
+        const source = initialText || '';
+        setText(source);
         setFontFamily(initialFontFamily || 'Verdana');
         setFontSize(initialFontSize || 40);
         setColor(initialColor || '#FFFFFF');
         const hydrated = normalizeRich(initialRich);
         setRichBase(hydrated.base);
         setRichSpans(hydrated.spans);
-        setSelection({ start: 0, end: 0 });
-    }, [isOpen, initialText, initialRich, initialFontFamily, initialFontSize, initialColor]);
+        setSelection(normalizeSelection(initialSelection, source.length));
+    }, [
+        isOpen, initialText, initialRich, initialSelection,
+        initialFontFamily, initialFontSize, initialColor,
+    ]);
 
     // The preview model, built through the shared conversion so the modal and
     // the primary preview resolve per-run style identically.
@@ -74,10 +89,12 @@ export default function HeaderModal({
 
     if (!isOpen) return null;
 
+    /** Read the live selection, but never let an empty reading clear a range. */
     const syncSelection = () => {
         const el = textareaRef.current;
         if (!el) return;
-        setSelection({ start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 });
+        const next = { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 };
+        setSelection((current) => keepSelection(current, next, text.length));
     };
 
     const handleRichChange = (next) => {
@@ -85,10 +102,13 @@ export default function HeaderModal({
         setRichSpans(next.spans);
     };
 
+    const band = headerBand();
+
     return (
         <Modal isOpen={isOpen} onClose={onClose} size="lg" eyebrow="EDITOR · HEADER" title="on-video header">
             <div className="flex flex-col md:flex-row gap-6">
-                {/* Left: Preview — shared overlay surface, same as the primary preview */}
+                {/* Left: Preview — shared overlay surface, same as the primary preview.
+                    The Header's dedicated band is outlined so its region is visible. */}
                 <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
                     <video
                         src={videoUrl}
@@ -99,6 +119,11 @@ export default function HeaderModal({
                         autoPlay
                         loop
                         onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                    />
+                    <div
+                        className="absolute left-0 right-0 border-b border-dashed border-white/20 pointer-events-none"
+                        style={{ top: `${band.topPct}%`, height: `${band.heightPct}%` }}
+                        aria-hidden="true"
                     />
                     <TextOverlayPreview
                         header={previewHeader}
@@ -118,15 +143,15 @@ export default function HeaderModal({
                                 onChange={(e) => setText(e.target.value)}
                                 onSelect={syncSelection}
                                 onKeyUp={syncSelection}
+                                onMouseUp={syncSelection}
                                 onClick={syncSelection}
-                                onBlur={syncSelection}
                                 rows={3}
                                 className="input-field resize-none"
                                 placeholder="Text overlaid in the top black region"
                             />
                             <p className="text-[11px] text-muted mt-1.5 leading-relaxed">
-                                Select any part of the text to give just that range its
-                                own colour, font and size — exactly like the hook.
+                                Select any part of the text — one letter, one word, or
+                                several — then restyle just that range.
                             </p>
                         </div>
 
@@ -178,8 +203,8 @@ export default function HeaderModal({
                                 social caption are separate and never drawn over the frame.
                             </p>
                             <p>
-                                With a selection, controls style just that range. With no
-                                selection they set the base style / default font.
+                                The header lives in the dashed band at the top of the
+                                frame; the hook owns the video area below it.
                             </p>
                         </div>
                     </div>

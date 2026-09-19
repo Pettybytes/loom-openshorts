@@ -47,11 +47,11 @@ export function hookLook(style) {
 }
 
 /**
- * Anchor as a percentage of the preview height. Must match hooks.py's overlay_y
- * math (top 20% / center 50% / bottom 70%), or the preview drifts from the
- * burned result.
+ * Hook anchors now come from the shared placement contract
+ * (lib/overlayLayout.js), so the preview, the geometry tests and hooks.py cannot
+ * drift apart. Re-exported under the historical name for existing consumers.
  */
-export const HOOK_POSITION_PCT = { top: 20, center: 50, bottom: 70 };
+export { HOOK_ANCHOR_PCT as HOOK_POSITION_PCT } from './overlayLayout.js';
 
 export const HOOK_POSITION_OPTIONS = [
   { value: 'top', label: 'top' },

@@ -9,6 +9,7 @@ import HeaderModal from './HeaderModal';
 import TextOverlayPreview from './TextOverlayPreview';
 import { buildPreviewState } from '../lib/editorPreviewState';
 import { normalizeRich, serializeRich, isEmptyBase } from '../lib/richText';
+import { keepSelection } from '../lib/rangeSelection';
 
 // Relative public paths: the editor is served from the same public origin as
 // the LOOM adapter (Caddy funnel), so the exchange/complete calls and the
@@ -128,6 +129,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // own record so a plain-string header keeps hydrating exactly as before.
   const [headerRich, setHeaderRich] = useState({ text: '', base: { color: null, font: null }, spans: [] });
   const [showHeaderModal, setShowHeaderModal] = useState(false);
+  // Selection made in the INLINE header field, carried into the header editor so
+  // the range interaction works from either entry point. Sticky, because the
+  // field loses focus (and reports an empty selection) when the button is hit.
+  const [headerInlineSelection, setHeaderInlineSelection] = useState({ start: 0, end: 0 });
   // Preview clock — drives the hook's time visibility in the primary preview.
   const [videoTime, setVideoTime] = useState(0);
   const [instruction, setInstruction] = useState('');
@@ -851,6 +856,9 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                 {titleOverlayEnabled && (
                   <>
                     <input type="text" value={titleOverlayText} onChange={(e) => setTitleOverlayText(e.target.value)}
+                      onSelect={(e) => setHeaderInlineSelection((cur) => keepSelection(cur, { start: e.currentTarget.selectionStart ?? 0, end: e.currentTarget.selectionEnd ?? 0 }, titleOverlayText.length))}
+                      onKeyUp={(e) => setHeaderInlineSelection((cur) => keepSelection(cur, { start: e.currentTarget.selectionStart ?? 0, end: e.currentTarget.selectionEnd ?? 0 }, titleOverlayText.length))}
+                      onMouseUp={(e) => setHeaderInlineSelection((cur) => keepSelection(cur, { start: e.currentTarget.selectionStart ?? 0, end: e.currentTarget.selectionEnd ?? 0 }, titleOverlayText.length))}
                       placeholder="Text overlaid in the top black region"
                       className="input-field" />
                     <div className="grid grid-cols-2 gap-2">
@@ -1157,6 +1165,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           videoUrl={clipUrl}
           initialText={titleOverlayText}
           initialRich={headerRich}
+          initialSelection={headerInlineSelection}
           initialPosition={titleOverlayPosition}
           initialAlignment={titleOverlayAlignment}
           initialFontFamily={titleOverlayFontFamily}

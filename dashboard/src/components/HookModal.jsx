@@ -6,6 +6,7 @@ import TextOverlayPreview from './TextOverlayPreview';
 import RangeStyleControls from './RangeStyleControls';
 import { buildPreviewState } from '../lib/editorPreviewState';
 import { normalizeRich, emptyBase } from '../lib/richText';
+import { keepSelection } from '../lib/rangeSelection';
 import {
     HOOK_STYLE_OPTIONS,
     HOOK_LOOKS,
@@ -95,10 +96,16 @@ export default function HookModal({
         displayDurationSec: displayDuration,
     };
 
+    /** Read the live selection, but never let an empty reading clear a range.
+     *
+     * Clicking a swatch blurs the textarea and browsers then report 0/0, which
+     * would wipe the range and silently redirect the patch to the base style.
+     * A real selection is therefore sticky, and there is no blur sync at all. */
     const syncSelection = () => {
         const el = textareaRef.current;
         if (!el) return;
-        setSelection({ start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 });
+        const next = { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 };
+        setSelection((current) => keepSelection(current, next, text.length));
     };
 
     // One handler for both scopes: RangeStyleControls decides whether a patch
@@ -142,8 +149,8 @@ export default function HookModal({
                                 onChange={(e) => setText(e.target.value)}
                                 onSelect={syncSelection}
                                 onKeyUp={syncSelection}
+                                onMouseUp={syncSelection}
                                 onClick={syncSelection}
-                                onBlur={syncSelection}
                                 rows={4}
                                 className="input-field resize-none font-serif"
                                 style={{ fontFamily: 'Noto Serif, serif' }}

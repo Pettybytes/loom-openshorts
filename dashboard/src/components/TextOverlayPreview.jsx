@@ -1,45 +1,49 @@
 import React from 'react';
-import { hookLook, HOOK_POSITION_PCT, SIZE_SCALE } from '../lib/hookStyles';
-import { hookVisibleAt } from '../lib/editorPreviewState';
+import { hookLook, SIZE_SCALE } from '../lib/hookStyles';
+import {
+  layoutOverlays,
+  headerBand,
+} from '../lib/overlayLayout';
 
 /**
  * TextOverlayPreview — THE authoritative overlay surface for the two visual
  * text concepts:
  *
- *   B. On-video Header  (`header`, rich text)
- *   C. Hook             (`hook`, rich text)
+ *   B. On-video Header  (`header`, rich text) — dedicated UPPER region
+ *   C. Hook             (`hook`, rich text)   — VIDEO region
  *
- * The primary editor preview, the Hook modal and the Header modal all render
- * this same component from the same `buildPreviewState()` output, which is what
- * makes them agree by construction instead of by luck. Each element supplies its
- * own runs, so a range styled in either modal shows up in every surface.
+ * The Header modal, the Hook modal, and the primary editor preview all render
+ * this component from the same `buildPreviewState()` output.
  *
- * Geometry deliberately mirrors openshorts/hooks.py (hook anchored at 20% / 50%
- * / 70%, sized at 5% of composition width) and the Remotion compositions, so the
- * preview, a browser render and a server burn all agree.
+ * PLACEMENT comes from lib/overlayLayout.js, which declares the two regions and
+ * is unit-tested: the Header is confined to its band and the Hook is anchored
+ * inside the video region, so neither element can move or overlap the other
+ * (a large Header, a large Hook, a moving Hook, or the Hook clearing at its
+ * duration all leave the other element's box identical).
  *
- * Hook font sizes use container query units (`cqw`) against this layer's own
- * width, so the preview scales exactly like the 1080px composition at any
- * preview size without a measuring effect. The Header keeps its pre-existing
- * px scaling so plain headers render identically to before.
+ * Rich text is shared; geometry is deliberately NOT. Hook font sizes use
+ * container query units (`cqw`) against this layer's own width so the preview
+ * scales exactly like the 1080px composition at any preview size; the Header
+ * keeps its pre-existing px scaling so plain headers render as they always did.
  *
  * Clip Title (A) and Social Caption (D) are metadata and are never rendered
  * here — the preview-state tests assert that.
  */
 export default function TextOverlayPreview({ header, hook, currentTime = 0, className = '' }) {
-  const showHook = !!hook?.present && hookVisibleAt(currentTime, hook?.durationSec);
-  const showHeader = !!header?.enabled && !!(header?.text || '').trim();
+  const layout = layoutOverlays({ header, hook, currentTime });
 
-  if (!showHook && !showHeader) return null;
+  if (!layout.header && !layout.hook) return null;
 
   return (
     <div
       className={`absolute inset-0 pointer-events-none overflow-hidden ${className}`}
-      style={{ containerType: 'inline-size' }}
+      // The overlay is a rendering surface, not content: nothing here should be
+      // selectable, or a stray drag highlights it instead of the editor's text.
+      style={{ containerType: 'inline-size', userSelect: 'none', WebkitUserSelect: 'none' }}
       data-testid="text-overlay-preview"
     >
-      {showHeader && <HeaderLayer header={header} />}
-      {showHook && <HookOverlayLayer hook={hook} />}
+      {layout.header && <HeaderLayer header={header} box={layout.header} />}
+      {layout.hook && <HookOverlayLayer hook={hook} box={layout.hook} />}
     </div>
   );
 }
@@ -51,50 +55,67 @@ function runsOf(element) {
 }
 
 /**
- * B. On-video Header. Base font size/colour/family come from the element's own
- * fields; a run's multiplier scales on top of that base.
+ * B. On-video Header.
+ *
+ * Rendered inside the band element: the band OWNS the geometry and clips, which
+ * is what makes "the Header cannot reach the Hook region" a property of the
+ * layout contract rather than of how long the text happens to be.
  */
-function HeaderLayer({ header }) {
+function HeaderLayer({ header, box }) {
+  const band = headerBand();
   const basePx = header.fontSize * 0.4; // pre-existing preview scale — unchanged
 
   return (
     <div
-      className="absolute left-0 right-0 flex"
+      data-testid="header-region"
       style={{
-        top: header.position === 'upper' ? '6%' : '14%',
-        paddingLeft: '8%',
-        paddingRight: '8%',
-        justifyContent: header.alignment === 'left' ? 'flex-start'
-          : header.alignment === 'right' ? 'flex-end' : 'center',
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        top: `${band.topPct}%`,
+        height: `${band.heightPct}%`,
+        overflow: 'hidden',
       }}
-      data-testid="header-overlay"
     >
-      <span
+      <div
+        data-testid="header-overlay"
+        className="absolute left-0 right-0 flex"
         style={{
-          fontFamily: header.fontFamily,
-          fontSize: `${basePx}px`,
-          fontWeight: 700,
-          color: header.color,
-          backgroundColor: header.background === 'none' ? 'transparent' : header.backgroundColor,
-          padding: header.background === 'none' ? 0 : '4px 10px',
-          borderRadius: header.background === 'none' ? 0 : 6,
-          textAlign: header.alignment,
-          whiteSpace: 'pre-wrap',
+          top: `${box.innerTopPct}%`,
+          paddingLeft: `${box.paddingPct}%`,
+          paddingRight: `${box.paddingPct}%`,
+          justifyContent: header.alignment === 'left' ? 'flex-start'
+            : header.alignment === 'right' ? 'flex-end' : 'center',
         }}
       >
-        {runsOf(header).map((run, i) => (
-          <RunSpan key={`${run.start}-${i}`} run={run} basePx={basePx} unit="px" />
-        ))}
-      </span>
+        <span
+          style={{
+            fontFamily: header.fontFamily,
+            fontSize: `${basePx}px`,
+            fontWeight: 700,
+            color: header.color,
+            backgroundColor: header.background === 'none' ? 'transparent' : header.backgroundColor,
+            padding: header.background === 'none' ? 0 : '4px 10px',
+            borderRadius: header.background === 'none' ? 0 : 6,
+            textAlign: header.alignment,
+            whiteSpace: 'pre-wrap',
+            maxWidth: '100%',
+          }}
+        >
+          {runsOf(header).map((run, i) => (
+            <RunSpan key={`${run.start}-${i}`} run={run} basePx={basePx} unit="px" />
+          ))}
+        </span>
+      </div>
     </div>
   );
 }
 
 /**
- * C. Hook. Its own overlay, its own style/position/size/timing, with per-range
- * rich text on top of the hook's own base size.
+ * C. Hook. Its own overlay, its own region, its own visibility semantics, with
+ * per-range rich text on top of the hook's own base size.
  */
-function HookOverlayLayer({ hook }) {
+function HookOverlayLayer({ hook, box }) {
   const look = hookLook(hook.style);
   const scale = SIZE_SCALE[hook.size] ?? 1;
   const entrance = ENTRANCE_KEYFRAMES[hook.entranceAnimation] ?? null;
@@ -103,12 +124,14 @@ function HookOverlayLayer({ hook }) {
 
   return (
     <div
-      className="absolute left-0 right-0 flex justify-center px-[5%]"
+      data-testid="hook-overlay"
+      className="absolute left-0 right-0 flex justify-center"
       style={{
-        top: `${HOOK_POSITION_PCT[hook.position] ?? HOOK_POSITION_PCT.top}%`,
+        top: `${box.topPct}%`,
+        paddingLeft: `${box.paddingPct}%`,
+        paddingRight: `${box.paddingPct}%`,
         transform: 'translateY(-50%)',
       }}
-      data-testid="hook-overlay"
     >
       {entrance && (
         <style>{`
