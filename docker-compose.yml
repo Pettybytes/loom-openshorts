@@ -3,7 +3,13 @@ services:
     build: .
     container_name: openshorts-backend
     ports:
-      - "8000:8000"
+      # LOOM Segment 3B: bound to loopback only. This backend has zero
+      # authentication on any endpoint (_assert_job_owner() is a no-op when
+      # BILLING_ENABLED is unset), so it must never be reachable except
+      # through the authenticated Caddy proxy at
+      # /Users/user/Desktop/LOOM-Factory/infra/tunnel-proxy/, which fronts it
+      # via Tailscale Funnel. Previously bound 0.0.0.0:8000 (all interfaces).
+      - "127.0.0.1:8000:8000"
     volumes:
       - .:/app
       - /app/__pycache__

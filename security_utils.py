@@ -32,13 +32,29 @@ def _ip_is_public(ip: str) -> bool:
     )
 
 
+# LOOM-specific exception (2026-09-08, Bryan-approved): the local Caddy
+# callback relay is intentionally reachable only via host.docker.internal
+# from inside Docker containers, which always resolves to a private address.
+# This one exact URL is allowlisted so OpenShorts can still deliver its
+# terminal job.completed/job.failed webhook there. No other private/loopback/
+# link-local/reserved/metadata address is affected -- every other call to
+# assert_public_url still goes through the full check below unchanged.
+_LOOM_RELAY_EXCEPTION = "http://host.docker.internal:8082/relay"
+
+
 def assert_public_url(url: str) -> str:
     """Return ``url`` if it is safe to fetch, else raise ``UnsafeURLError``.
 
     Blocks non-http(s) schemes and hosts that resolve to any non-public IP.
     Resolves every A/AAAA record so a hostname that maps to a private range
     (or to 169.254.169.254) is rejected rather than silently fetched.
+
+    Exception: the exact LOOM local relay URL (see _LOOM_RELAY_EXCEPTION
+    above) is allowlisted by literal string match only.
     """
+    if url == _LOOM_RELAY_EXCEPTION:
+        return url
+
     if not url or not isinstance(url, str):
         raise UnsafeURLError("Empty URL")
 
