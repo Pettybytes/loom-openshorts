@@ -3,8 +3,8 @@ import Modal from './ui/Modal';
 import TextOverlayPreview from './TextOverlayPreview';
 import RangeStyleControls from './RangeStyleControls';
 import { normalizeRich, buildRuns } from '../lib/richText';
-import { keepSelection, normalizeSelection } from '../lib/rangeSelection';
-import { headerBand } from '../lib/overlayLayout';
+import { keepSelection, normalizeSelection, readSelection } from '../lib/rangeSelection';
+import { headerUsableBand } from '../lib/overlayLayout';
 
 /**
  * HeaderModal — edits CONCEPT B (the on-video Header) and nothing else.
@@ -89,12 +89,15 @@ export default function HeaderModal({
 
     if (!isOpen) return null;
 
-    /** Read the live selection, but never let an empty reading clear a range. */
+    /** Read the live selection through the null-safe helper.
+     *
+     * An unmounted/absent element yields null and we keep what we had, so a
+     * missing ref can never crash the editor. A real selection is sticky, so the
+     * empty reading a browser reports after focus loss cannot wipe the range. */
     const syncSelection = () => {
-        const el = textareaRef.current;
-        if (!el) return;
-        const next = { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 };
-        setSelection((current) => keepSelection(current, next, text.length));
+        const snapshot = readSelection(textareaRef.current);
+        if (!snapshot) return;
+        setSelection((current) => keepSelection(current, snapshot, text.length));
     };
 
     const handleRichChange = (next) => {
@@ -102,7 +105,7 @@ export default function HeaderModal({
         setRichSpans(next.spans);
     };
 
-    const band = headerBand();
+    const usable = headerUsableBand();
 
     return (
         <Modal isOpen={isOpen} onClose={onClose} size="lg" eyebrow="EDITOR · HEADER" title="on-video header">
@@ -121,8 +124,8 @@ export default function HeaderModal({
                         onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                     />
                     <div
-                        className="absolute left-0 right-0 border-b border-dashed border-white/20 pointer-events-none"
-                        style={{ top: `${band.topPct}%`, height: `${band.heightPct}%` }}
+                        className="absolute left-0 right-0 border border-dashed border-white/25 pointer-events-none"
+                        style={{ top: `${usable.topPct}%`, height: `${usable.heightPct}%` }}
                         aria-hidden="true"
                     />
                     <TextOverlayPreview
@@ -203,8 +206,8 @@ export default function HeaderModal({
                                 social caption are separate and never drawn over the frame.
                             </p>
                             <p>
-                                The header lives in the dashed band at the top of the
-                                frame; the hook owns the video area below it.
+                                The header sits centred in the dashed band at the top
+                                of the frame; the hook owns the video area below it.
                             </p>
                         </div>
                     </div>

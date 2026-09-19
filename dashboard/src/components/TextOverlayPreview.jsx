@@ -74,38 +74,56 @@ function HeaderLayer({ header, box }) {
         right: 0,
         top: `${band.topPct}%`,
         height: `${band.heightPct}%`,
+        // The region owns its geometry: whatever the text does, it cannot
+        // leave the region or reach the Hook below it.
         overflow: 'hidden',
       }}
     >
+      {/* The USABLE band — the region minus the safe inset at each edge. The
+          Header is centred (or top-anchored) within THIS box, so it never sits
+          crowded against a boundary. */}
       <div
-        data-testid="header-overlay"
-        className="absolute left-0 right-0 flex"
+        data-testid="header-usable"
         style={{
-          top: `${box.innerTopPct}%`,
-          paddingLeft: `${box.paddingPct}%`,
-          paddingRight: `${box.paddingPct}%`,
-          justifyContent: header.alignment === 'left' ? 'flex-start'
-            : header.alignment === 'right' ? 'flex-end' : 'center',
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          top: `${box.insetInBandPct}%`,
+          bottom: `${box.insetInBandPct}%`,
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: box.align === 'center' ? 'center' : 'flex-start',
         }}
       >
-        <span
+        <div
+          data-testid="header-overlay"
+          className="flex"
           style={{
-            fontFamily: header.fontFamily,
-            fontSize: `${basePx}px`,
-            fontWeight: 700,
-            color: header.color,
-            backgroundColor: header.background === 'none' ? 'transparent' : header.backgroundColor,
-            padding: header.background === 'none' ? 0 : '4px 10px',
-            borderRadius: header.background === 'none' ? 0 : 6,
-            textAlign: header.alignment,
-            whiteSpace: 'pre-wrap',
-            maxWidth: '100%',
+            paddingLeft: `${box.paddingPct}%`,
+            paddingRight: `${box.paddingPct}%`,
+            justifyContent: header.alignment === 'left' ? 'flex-start'
+              : header.alignment === 'right' ? 'flex-end' : 'center',
           }}
         >
-          {runsOf(header).map((run, i) => (
-            <RunSpan key={`${run.start}-${i}`} run={run} basePx={basePx} unit="px" />
-          ))}
-        </span>
+          <span
+            style={{
+              fontFamily: header.fontFamily,
+              fontSize: `${basePx}px`,
+              fontWeight: 700,
+              color: header.color,
+              backgroundColor: header.background === 'none' ? 'transparent' : header.backgroundColor,
+              padding: header.background === 'none' ? 0 : '4px 10px',
+              borderRadius: header.background === 'none' ? 0 : 6,
+              textAlign: header.alignment,
+              whiteSpace: 'pre-wrap',
+              maxWidth: '100%',
+            }}
+          >
+            {runsOf(header).map((run, i) => (
+              <RunSpan key={`${run.start}-${i}`} run={run} basePx={basePx} unit="px" />
+            ))}
+          </span>
+        </div>
       </div>
     </div>
   );

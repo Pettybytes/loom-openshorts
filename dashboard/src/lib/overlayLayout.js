@@ -30,11 +30,22 @@ export const HEADER_REGION = Object.freeze({ top: 0, bottom: 14 });
 export const HOOK_REGION = Object.freeze({ top: 16, bottom: 100 });
 
 /**
- * The Header's two positions, BOTH inside HEADER_REGION:
- *   upper — hugging the top edge of its region
- *   top   — sitting lower inside its region (the previous default)
+ * Safe breathing room inside the Header region, in frame %, applied at BOTH
+ * edges. The Header never touches the top or the bottom of its region, so it
+ * reads as intentionally placed instead of crowded against a boundary.
  */
-export const HEADER_ANCHOR_PCT = Object.freeze({ upper: 3, top: 9 });
+export const HEADER_SAFE_INSET_PCT = 2;
+
+/**
+ * The Header's two positions, both inside the USABLE band:
+ *   top   — the default; rendered CENTRED in the usable band
+ *   upper — anchored to the safe top inset
+ * An explicit anchor can never breach the safe padding (see headerAnchorPct).
+ */
+export const HEADER_ANCHOR_PCT = Object.freeze({ upper: 2, top: 7 });
+
+/** Vertical alignment semantics per position. */
+export const HEADER_ALIGN = Object.freeze({ top: 'center', upper: 'flex-start' });
 
 /** The Hook's anchors inside HOOK_REGION (unchanged: hooks.py uses the same). */
 export const HOOK_ANCHOR_PCT = Object.freeze({ top: 20, center: 50, bottom: 70 });
@@ -54,11 +65,28 @@ export function headerBand() {
   };
 }
 
-/** Resolve a Header position to a frame-% anchor, clamped into its region. */
+/**
+ * The Header's USABLE band: its region minus the safe inset at both edges.
+ * This is what the Header is actually positioned and centred within, and what
+ * bounds a large rich-text range.
+ */
+export function headerUsableBand() {
+  const regionHeight = HEADER_REGION.bottom - HEADER_REGION.top;
+  const inset = Math.min(HEADER_SAFE_INSET_PCT, regionHeight / 3);
+  return {
+    topPct: HEADER_REGION.top + inset,
+    bottomPct: HEADER_REGION.bottom - inset,
+    heightPct: regionHeight - (2 * inset),
+    insetPct: inset,
+  };
+}
+
+/** Resolve a Header position to a frame-% anchor, clamped into the USABLE band. */
 export function headerAnchorPct(position) {
   const requested = HEADER_ANCHOR_PCT[position];
   const anchor = requested == null ? HEADER_ANCHOR_PCT.top : requested;
-  return clamp(anchor, HEADER_REGION.top, HEADER_REGION.bottom);
+  const usable = headerUsableBand();
+  return clamp(anchor, usable.topPct, usable.bottomPct);
 }
 
 /**
@@ -86,14 +114,22 @@ export function hookAnchorPct(position) {
 export function headerBox(header) {
   if (!header?.enabled) return null;
   const position = header.position || 'top';
+  const band = headerBand();
+  const usable = headerUsableBand();
   const topPct = headerAnchorPct(position);
   return {
     region: 'header',
     position,
+    // 'top' (the default) is CENTRED inside the usable band; 'upper' hugs the
+    // safe top inset. Either way the text stays off both edges.
+    align: HEADER_ALIGN[position] ?? HEADER_ALIGN.top,
     topPct,
     bottomPct: HEADER_REGION.bottom,
     heightPct: HEADER_REGION.bottom - topPct,
-    innerTopPct: headerInnerTopPct(position),
+    usable,
+    // Where the usable band starts inside the band element, as a % of the band:
+    // literally what the renderer feeds to CSS top/bottom.
+    insetInBandPct: ((usable.topPct - band.topPct) / band.heightPct) * 100,
     paddingPct: OVERLAY_PADDING_PCT,
   };
 }

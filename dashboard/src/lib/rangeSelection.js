@@ -26,6 +26,48 @@ export function normalizeSelection(selection, textLength) {
   return start <= end ? { start, end } : { start: end, end: start };
 }
 
+/** True for things we may safely read a selection from. */
+function looksLikeTextField(element) {
+  return !!element
+    && typeof element === 'object'
+    && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA');
+}
+
+/**
+ * Snapshot a text field's selection, safely.
+ *
+ * NEVER touches the element unless it is recognisably a text field, so a null
+ * ref, an unmounted node, or a React event whose `currentTarget` has already
+ * been nulled can all be handed in without risk.
+ *
+ * MUST be called EAGERLY, during the event, and its plain-object result kept.
+ * React nulls `event.currentTarget` once dispatch completes, so reading it from
+ * inside a deferred state updater throws
+ * "Cannot read properties of null (reading 'selectionStart')" — which is what
+ * took the editor down through the error boundary.
+ *
+ * Returns null when there is nothing safe to read.
+ */
+export function readSelection(element) {
+  if (!looksLikeTextField(element)) return null;
+  const start = Number(element.selectionStart);
+  const end = Number(element.selectionEnd);
+  return {
+    start: Number.isFinite(start) ? start : 0,
+    end: Number.isFinite(end) ? end : 0,
+  };
+}
+
+/**
+ * Eager snapshot + sticky merge, in the one order that cannot crash.
+ * A missing element yields the selection we already had, never an exception.
+ */
+export function captureSelection(element, current, textLength) {
+  const snapshot = readSelection(element);
+  if (!snapshot) return normalizeSelection(current, textLength);
+  return keepSelection(current, snapshot, textLength);
+}
+
 /** True when the selection actually covers characters. */
 export function hasRange(selection, textLength) {
   const sel = normalizeSelection(selection, textLength);

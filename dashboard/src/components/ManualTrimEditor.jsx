@@ -9,7 +9,7 @@ import HeaderModal from './HeaderModal';
 import TextOverlayPreview from './TextOverlayPreview';
 import { buildPreviewState } from '../lib/editorPreviewState';
 import { normalizeRich, serializeRich, isEmptyBase } from '../lib/richText';
-import { keepSelection } from '../lib/rangeSelection';
+import { keepSelection, readSelection } from '../lib/rangeSelection';
 
 // Relative public paths: the editor is served from the same public origin as
 // the LOOM adapter (Caddy funnel), so the exchange/complete calls and the
@@ -524,6 +524,18 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     return () => clearTimeout(t);
   }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction]);
 
+  // Snapshot the inline field's selection EAGERLY, during the event.
+  //
+  // React nulls an event's currentTarget once dispatch completes, so reading
+  // selectionStart from inside a deferred state updater threw
+  // "Cannot read properties of null (reading 'selectionStart')" and tripped the
+  // editor error boundary. The snapshot is taken now and is a plain object.
+  const syncHeaderInlineSelection = (e) => {
+    const snapshot = readSelection(e?.currentTarget);
+    if (!snapshot) return;
+    setHeaderInlineSelection((cur) => keepSelection(cur, snapshot, titleOverlayText.length));
+  };
+
   // --- 4. Apply caption + rerender + register + card -------------------------------
   const handleRerender = useCallback(async () => {
     if (!session) { setError('Editor session is missing — reopen the clip from the review card.'); return; }
@@ -856,9 +868,9 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                 {titleOverlayEnabled && (
                   <>
                     <input type="text" value={titleOverlayText} onChange={(e) => setTitleOverlayText(e.target.value)}
-                      onSelect={(e) => setHeaderInlineSelection((cur) => keepSelection(cur, { start: e.currentTarget.selectionStart ?? 0, end: e.currentTarget.selectionEnd ?? 0 }, titleOverlayText.length))}
-                      onKeyUp={(e) => setHeaderInlineSelection((cur) => keepSelection(cur, { start: e.currentTarget.selectionStart ?? 0, end: e.currentTarget.selectionEnd ?? 0 }, titleOverlayText.length))}
-                      onMouseUp={(e) => setHeaderInlineSelection((cur) => keepSelection(cur, { start: e.currentTarget.selectionStart ?? 0, end: e.currentTarget.selectionEnd ?? 0 }, titleOverlayText.length))}
+                      onSelect={syncHeaderInlineSelection}
+                      onKeyUp={syncHeaderInlineSelection}
+                      onMouseUp={syncHeaderInlineSelection}
                       placeholder="Text overlaid in the top black region"
                       className="input-field" />
                     <div className="grid grid-cols-2 gap-2">
