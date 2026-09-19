@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import Modal from './ui/Modal';
-import TextOverlayPreview from './TextOverlayPreview';
+import PreviewSurface from './PreviewSurface';
 import RangeStyleControls from './RangeStyleControls';
 import { normalizeRich, buildRuns } from '../lib/richText';
 import { keepSelection, normalizeSelection, readSelection } from '../lib/rangeSelection';
@@ -112,27 +112,21 @@ export default function HeaderModal({
             <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview — shared overlay surface, same as the primary preview.
                     The Header's dedicated band is outlined so its region is visible. */}
-                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
-                    <video
-                        src={videoUrl}
-                        className="w-full h-full object-contain"
-                        controls
-                        muted
-                        playsInline
-                        autoPlay
-                        loop
-                        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                    />
-                    <div
-                        className="absolute left-0 right-0 border border-dashed border-white/25 pointer-events-none"
-                        style={{ top: `${usable.topPct}%`, height: `${usable.heightPct}%` }}
-                        aria-hidden="true"
-                    />
-                    <TextOverlayPreview
+                <div className="flex-1 flex flex-col items-center justify-center rounded-card border border-rule overflow-hidden">
+                    <PreviewSurface
+                        videoUrl={videoUrl}
                         header={previewHeader}
                         hook={hookPreview || null}
                         currentTime={currentTime}
-                    />
+                        onTimeUpdate={setCurrentTime}
+                        maxWidth={340}
+                    >
+                        <div
+                            className="absolute left-0 right-0 border border-dashed border-white/25 pointer-events-none"
+                            style={{ top: `${usable.topPct}%`, height: `${usable.heightPct}%` }}
+                            aria-hidden="true"
+                        />
+                    </PreviewSurface>
                 </div>
 
                 {/* Right: Controls */}

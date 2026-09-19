@@ -16,11 +16,15 @@ import {
   HOOK_ANCHOR_PCT,
   HEADER_SAFE_INSET_PCT,
   HEADER_ALIGN,
+  FRAME_ASPECT,
   headerBand,
   headerUsableBand,
   headerAnchorPct,
   headerInnerTopPct,
   hookAnchorPct,
+  frameRect,
+  framePoint,
+  normalizedPlacement,
   headerBox,
   hookBox,
   layoutOverlays,
@@ -276,4 +280,91 @@ test('a short region degrades gracefully instead of inverting the band', () => {
   const usable = headerUsableBand();
   assert.ok(usable.heightPct > 0);
   assert.ok(usable.topPct < usable.bottomPct);
+});
+
+// --- two-surface geometry parity -------------------------------------------
+// The defect: the modal preview sized its box 9:16 while the main preview used
+// lg:aspect-auto, so the 9:16 video was letterboxed in one and not the other.
+// Identical normalized values therefore landed differently relative to the
+// video. These tests pin the contract that makes them equivalent.
+
+test('the frame keeps the render aspect in every viewport', () => {
+  const viewports = [
+    { w: 265, h: 471 },   // modal column
+    { w: 420, h: 1000 },  // main preview column (tall, sidebar-driven)
+    { w: 340, h: 604 },   // width-capped modal
+    { w: 180, h: 900 },   // very narrow
+    { w: 1200, h: 400 },  // very wide
+  ];
+  for (const vp of viewports) {
+    const rect = frameRect(vp.w, vp.h);
+    assert.ok(Math.abs((rect.width / rect.height) - FRAME_ASPECT) < 1e-9,
+      `${vp.w}x${vp.h} must keep the render aspect`);
+    assert.ok(rect.width <= vp.w + 1e-9 && rect.height <= vp.h + 1e-9,
+      `${vp.w}x${vp.h} frame must fit its viewport`);
+  }
+});
+
+test('the same normalized position is equivalent at every viewport size', () => {
+  const box = headerBox(header());
+  const modal = { w: 265, h: 471 };
+  const main = { w: 420, h: 1000 };
+  for (const vp of [modal, main]) {
+    const rect = frameRect(vp.w, vp.h);
+    const point = framePoint(vp.w, vp.h, box.topPct);
+    // The fraction of the FRAME is the invariant; the pixels differ, as they must.
+    // Tolerance, not equality: this is floating-point geometry.
+    const topFraction = (point.y - rect.top) / rect.height;
+    const leftFraction = (point.x - rect.left) / rect.width;
+    assert.ok(Math.abs(topFraction - (box.topPct / 100)) < 1e-9,
+      `${vp.w}x${vp.h}: top fraction ${topFraction} must equal ${box.topPct / 100}`);
+    assert.ok(Math.abs(leftFraction - 0.5) < 1e-9,
+      `${vp.w}x${vp.h}: left fraction ${leftFraction} must be centred`);
+  }
+});
+
+test('both surfaces derive placement from the same normalized contract', () => {
+  const layout = layoutOverlays({ header: header(), hook: hook() });
+  const fromMain = normalizedPlacement(layout.header);
+  const fromModal = normalizedPlacement(headerBox(header()));
+  assert.deepEqual(fromModal, fromMain);
+  assert.equal(fromMain.topPct, headerAnchorPct('top'));
+  assert.equal(fromMain.align, 'center');
+  assert.equal(normalizedPlacement(layout.hook).topPct, hookAnchorPct('top'));
+});
+
+test('mixed font sizes in Header and Hook do not perturb normalized placement', () => {
+  const plain = layoutOverlays({ header: header(), hook: hook() });
+  const mixed = layoutOverlays({
+    header: header({ fontSize: 160, spans: [{ start: 0, end: 6, size: 1.375 }, { start: 7, end: 8, size: 2.5 }] }),
+    hook: hook({ size: 'L', text: 'A MUCH LONGER HOOK WITH SPANS', spans: [{ start: 0, end: 4, size: 0.8 }] }),
+  });
+  assert.deepEqual(normalizedPlacement(mixed.header), normalizedPlacement(plain.header));
+  assert.deepEqual(normalizedPlacement(mixed.hook), normalizedPlacement(plain.hook));
+});
+
+test('containment and non-collision hold in viewport pixels too', () => {
+  const layout = layoutOverlays({ header: header({ fontSize: 160 }), hook: hook() });
+  for (const vp of [{ w: 265, h: 471 }, { w: 420, h: 1000 }, { w: 150, h: 1200 }]) {
+    const rect = frameRect(vp.w, vp.h);
+    const headerFloor = framePoint(vp.w, vp.h, layout.header.bottomPct);
+    const hookTop = framePoint(vp.w, vp.h, layout.hook.topPct);
+    assert.ok(headerFloor.y <= hookTop.y, 'no collision once mapped to pixels');
+    assert.ok(headerFloor.y <= rect.top + rect.height + 1e-9, 'header stays inside the frame');
+    assert.ok(hookTop.y >= rect.top - 1e-9, 'hook stays inside the frame');
+  }
+});
+
+test('Hook duration visibility is a time property, not a geometry property', () => {
+  const at2 = layoutOverlays({ header: header(), hook: hook({ durationSec: 7 }), currentTime: 2 });
+  const at30 = layoutOverlays({ header: header(), hook: hook({ durationSec: 7 }), currentTime: 30 });
+  assert.ok(at2.hook);
+  assert.equal(at30.hook, null);
+  assert.deepEqual(normalizedPlacement(at2.header), normalizedPlacement(at30.header));
+});
+
+test('an empty viewport yields no points instead of NaN geometry', () => {
+  assert.equal(frameRect(0, 0), null);
+  assert.equal(frameRect(-5, 100), null);
+  assert.equal(framePoint(265, 0, 20), null);
 });

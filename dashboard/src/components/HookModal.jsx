@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Loader2 } from 'lucide-react';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
-import TextOverlayPreview from './TextOverlayPreview';
+import PreviewSurface from './PreviewSurface';
 import RangeStyleControls from './RangeStyleControls';
 import { buildPreviewState } from '../lib/editorPreviewState';
 import { normalizeRich, emptyBase } from '../lib/richText';
@@ -118,21 +118,14 @@ export default function HookModal({
         <Modal isOpen={isOpen} onClose={onClose} size="lg" eyebrow="EDITOR · HOOK" title="viral hook">
             <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview — the SAME overlay surface as the primary preview */}
-                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
-                    <video
-                        src={previewVideoUrl}
-                        className="w-full h-full object-contain"
-                        controls
-                        muted
-                        playsInline
-                        autoPlay
-                        loop
-                        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                    />
-                    <TextOverlayPreview
+                <div className="flex-1 flex flex-col items-center justify-center rounded-card border border-rule overflow-hidden">
+                    <PreviewSurface
+                        videoUrl={previewVideoUrl}
                         header={headerPreview}
                         hook={previewState.hook}
                         currentTime={currentTime}
+                        onTimeUpdate={setCurrentTime}
+                        maxWidth={340}
                     />
                 </div>
 

@@ -165,6 +165,56 @@ export function layoutOverlays({ header, hook, currentTime = 0 } = {}) {
   };
 }
 
+/** The render frame's intrinsic aspect (the burn output is 9:16). */
+export const FRAME_ASPECT = 9 / 16;
+
+/**
+ * Fit the render frame inside a viewport box, applying the same rule
+ * `object-contain` applies, and return its rect in viewport pixels.
+ *
+ * Every overlay position is a percentage of THIS rect, so the surface's own
+ * size cancels out: identical normalized geometry yields an identical position
+ * within the frame at any viewport size. That is the geometry-parity contract,
+ * and it is why the modal and the primary preview can no longer disagree.
+ */
+export function frameRect(viewportWidth, viewportHeight, aspect = FRAME_ASPECT) {
+  const vw = Number(viewportWidth);
+  const vh = Number(viewportHeight);
+  if (!(vw > 0) || !(vh > 0) || !(aspect > 0)) return null;
+  const width = Math.min(vw, vh * aspect);
+  const height = width / aspect;
+  return {
+    left: (vw - width) / 2,
+    top: (vh - height) / 2,
+    width,
+    height,
+    aspect,
+  };
+}
+
+/**
+ * A normalized frame coordinate in viewport pixels.
+ * `topPct` is a percentage of the frame's height; `leftPct` of its width.
+ */
+export function framePoint(viewportWidth, viewportHeight, topPct, leftPct = 50, aspect = FRAME_ASPECT) {
+  const rect = frameRect(viewportWidth, viewportHeight, aspect);
+  if (!rect) return null;
+  return {
+    x: rect.left + (leftPct / 100) * rect.width,
+    y: rect.top + (topPct / 100) * rect.height,
+    rect,
+  };
+}
+
+/**
+ * The viewport-independent placement an overlay occupies. Two surfaces showing
+ * the same state must return the same value here — that is what "parity" means.
+ */
+export function normalizedPlacement(box) {
+  if (!box) return null;
+  return { region: box.region, topPct: box.topPct, align: box.align ?? null };
+}
+
 /** True when the two boxes would occupy the same vertical space. */
 export function overlaysCollide(layout) {
   if (!layout?.header || !layout?.hook) return false;

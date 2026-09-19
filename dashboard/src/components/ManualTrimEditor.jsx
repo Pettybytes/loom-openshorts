@@ -7,6 +7,7 @@ import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import HeaderModal from './HeaderModal';
 import TextOverlayPreview from './TextOverlayPreview';
+import PreviewSurface from './PreviewSurface';
 import { buildPreviewState } from '../lib/editorPreviewState';
 import { normalizeRich, serializeRich, isEmptyBase } from '../lib/richText';
 import { keepSelection, readSelection } from '../lib/rangeSelection';
@@ -816,24 +817,25 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
 
         {/* Large preview + Generated Shorts side panel */}
         <div className="card overflow-hidden flex flex-col lg:flex-row gap-0 lg:min-h-[560px]">
-          {/* Preview column */}
-          <div className="w-full lg:w-[min(42vw,420px)] bg-black shrink-0 aspect-[9/16] lg:aspect-auto lg:h-auto relative group/video mx-auto lg:mx-0">
-            <video ref={videoRef} src={clipUrl} controls playsInline
-              onTimeUpdate={(e) => setVideoTime(e.currentTarget.currentTime)}
-              className="w-full h-full object-contain" />
-            <div className="absolute top-3 left-3">
-              <span className="bg-black/70 text-ink font-mono text-micro uppercase px-2 py-1 rounded-full">
-                clip {Number(session?.clip_index ?? 0) + 1}
-              </span>
-            </div>
-            {/* THE authoritative overlay surface. Header and Hook both render
-                here, from the same preview state the Hook modal renders. */}
-            <TextOverlayPreview
+          {/* Preview column — the SAME surface the range modals render, so the
+              Header/Hook land identically here and in the modal preview. */}
+          <div className="w-full lg:w-[min(42vw,420px)] shrink-0 mx-auto lg:mx-0 group/video">
+            <PreviewSurface
+              videoUrl={clipUrl}
+              videoRef={videoRef}
               header={previewState.header}
               hook={previewState.hook}
               currentTime={videoTime}
-            />
-            {clipUrl == null && <p className="absolute inset-0 flex items-center justify-center text-xs text-muted">preview unavailable</p>}
+              onTimeUpdate={setVideoTime}
+              maxWidth={420}
+            >
+              <div className="absolute top-3 left-3">
+                <span className="bg-black/70 text-ink font-mono text-micro uppercase px-2 py-1 rounded-full">
+                  clip {Number(session?.clip_index ?? 0) + 1}
+                </span>
+              </div>
+              {clipUrl == null && <p className="absolute inset-0 flex items-center justify-center text-xs text-muted">preview unavailable</p>}
+            </PreviewSurface>
           </div>
 
           {/* Side panel */}
