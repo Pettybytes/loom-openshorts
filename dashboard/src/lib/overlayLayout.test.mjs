@@ -17,6 +17,12 @@ import {
   HEADER_SAFE_INSET_PCT,
   HEADER_ALIGN,
   FRAME_ASPECT,
+  HEADER_REGION_MODES,
+  DEFAULT_HEADER_REGION,
+  DEDICATED_CANVAS_PCT,
+  normalizeHeaderRegion,
+  headerRegionFor,
+  canvasLayout,
   headerBand,
   headerUsableBand,
   headerAnchorPct,
@@ -367,4 +373,160 @@ test('an empty viewport yields no points instead of NaN geometry', () => {
   assert.equal(frameRect(0, 0), null);
   assert.equal(frameRect(-5, 100), null);
   assert.equal(framePoint(265, 0, 20), null);
+});
+
+// --- layout modes: overlay (accepted default) vs dedicated black region -----
+
+const headerIn = (mode, over = {}) => ({ enabled: true, text: 'HEADER PREVIEW', position: 'top', region: mode, ...over });
+
+const MODES = ['overlay', 'dedicated'];
+
+test('the two declared modes are resolved, and anything else is the default', () => {
+  assert.deepEqual(HEADER_REGION_MODES, ['overlay', 'dedicated']);
+  assert.equal(DEFAULT_HEADER_REGION, 'overlay');
+  assert.equal(normalizeHeaderRegion('dedicated'), 'dedicated');
+  assert.equal(normalizeHeaderRegion('overlay'), 'overlay');
+  assert.equal(normalizeHeaderRegion(undefined), 'overlay');
+  assert.equal(normalizeHeaderRegion('nonsense'), 'overlay');
+});
+
+test('a draft saved before the mode existed reads back as the accepted default', () => {
+  // Backward compatibility: no `region` anywhere means overlay behaviour, with
+  // exactly the geometry Bryan accepted.
+  const legacy = { enabled: true, text: 'HEADER PREVIEW', position: 'top' };
+  const box = headerBox(legacy);
+  assert.equal(box.mode, 'overlay');
+  assert.equal(box.topPct, headerAnchorPct('top', 'overlay'));
+  assert.equal(box.bottomPct, HEADER_REGION.bottom);
+  assert.equal(box.usable.insetPct, HEADER_SAFE_INSET_PCT);
+});
+
+test('dedicated mode reserves a real black band and puts the video below it', () => {
+  const overlay = canvasLayout('overlay');
+  const dedicated = canvasLayout('dedicated');
+  assert.equal(overlay.videoTopPct, 0, 'overlay: the canvas IS the video');
+  assert.equal(overlay.canvasAspect, FRAME_ASPECT);
+  assert.equal(dedicated.videoTopPct, DEDICATED_CANVAS_PCT);
+  assert.equal(dedicated.videoHeightPct, 100 - DEDICATED_CANVAS_PCT);
+  assert.ok(dedicated.canvasAspect < FRAME_ASPECT, 'the canvas is taller than 9:16');
+});
+
+test('the Header region is the band in overlay mode and the black band in dedicated mode', () => {
+  assert.deepEqual(headerRegionFor('overlay'), { top: 0, bottom: HEADER_REGION.bottom });
+  assert.deepEqual(headerRegionFor('dedicated'), { top: 0, bottom: DEDICATED_CANVAS_PCT });
+});
+
+test('the Header stays inside its own region in BOTH modes', () => {
+  for (const mode of MODES) {
+    const region = headerRegionFor(mode);
+    for (const position of ['upper', 'top']) {
+      const box = headerBox(headerIn(mode, { position }));
+      assert.equal(box.mode, mode);
+      assert.ok(box.topPct >= region.top, `${mode}/${position} above region`);
+      assert.ok(box.bottomPct <= region.bottom, `${mode}/${position} below region`);
+    }
+  }
+});
+
+test('the Header keeps its safe inset inside the black region in dedicated mode', () => {
+  const usable = headerUsableBand('dedicated');
+  assert.ok(usable.topPct > 0, 'safe top inset inside the black band');
+  assert.ok(usable.bottomPct < DEDICATED_CANVAS_PCT, 'safe bottom inset inside the black band');
+  assert.ok(usable.heightPct > 0);
+});
+
+test('the Hook stays inside the VIDEO region in BOTH modes', () => {
+  for (const mode of MODES) {
+    const canvas = canvasLayout(mode);
+    for (const position of ['top', 'center', 'bottom']) {
+      const box = hookBox(hook({ position }), { mode });
+      assert.ok(box.topPct >= canvas.videoTopPct, `${mode}/${position} above the video region`);
+      assert.ok(box.topPct <= 100);
+    }
+  }
+});
+
+test('the Hook keeps its relative placement within the video in both modes', () => {
+  for (const mode of MODES) {
+    const canvas = canvasLayout(mode);
+    const frac = (hookAnchorPct('top', mode) - canvas.videoTopPct) / canvas.videoHeightPct;
+    assert.ok(Math.abs(frac - (HOOK_ANCHOR_PCT.top / 100)) < 1e-9,
+      `${mode}: the Hook sits at the same relative height inside the video`);
+  }
+});
+
+test('Header and Hook never collide in either mode, at any size', () => {
+  for (const mode of MODES) {
+    for (const position of ['upper', 'top']) {
+      const layout = layoutOverlays({
+        header: headerIn(mode, { position, fontSize: 160, spans: [{ start: 0, end: 14, size: 2.5 }] }),
+        hook: hook({ size: 'L', text: 'A MUCH BIGGER HOOK' }),
+      });
+      assert.equal(overlaysCollide(layout), false, `${mode}/${position} collided`);
+      assert.ok(layout.header.bottomPct <= layout.hook.topPct,
+        `${mode}/${position}: header floor must stay above hook top`);
+    }
+  }
+});
+
+test('a large Header rich-text range stays contained in BOTH modes', () => {
+  for (const mode of MODES) {
+    const plain = headerBox(headerIn(mode));
+    const big = headerBox(headerIn(mode, {
+      fontSize: 160,
+      spans: [{ start: 0, end: 6, size: 2.5 }, { start: 7, end: 8, size: 0.4 }],
+    }));
+    assert.deepEqual(big.usable, plain.usable, `${mode}: oversized text must not redefine the region`);
+    assert.equal(big.bottomPct, plain.bottomPct);
+  }
+});
+
+test('mixed font sizes do not change normalized placement in either mode', () => {
+  for (const mode of MODES) {
+    const plain = layoutOverlays({ header: headerIn(mode), hook: hook() });
+    const mixed = layoutOverlays({
+      header: headerIn(mode, { fontSize: 120, spans: [{ start: 0, end: 4, size: 1.375 }] }),
+      hook: hook({ size: 'L', spans: [{ start: 0, end: 4, size: 0.8 }] }),
+    });
+    assert.deepEqual(normalizedPlacement(mixed.header), normalizedPlacement(plain.header));
+    assert.deepEqual(normalizedPlacement(mixed.hook), normalizedPlacement(plain.hook));
+  }
+});
+
+test('the Header does not move when the Hook appears, disappears or moves, in either mode', () => {
+  for (const mode of MODES) {
+    const base = layoutOverlays({ header: headerIn(mode), hook: hook({ durationSec: 7 }), currentTime: 1 }).header;
+    const cleared = layoutOverlays({ header: headerIn(mode), hook: hook({ durationSec: 7 }), currentTime: 30 }).header;
+    const absent = layoutOverlays({ header: headerIn(mode), hook: null }).header;
+    const moved = layoutOverlays({ header: headerIn(mode), hook: hook({ position: 'bottom' }) }).header;
+    assert.deepEqual(cleared, base, `${mode}: clearing the Hook moved the Header`);
+    assert.deepEqual(absent, base, `${mode}: an absent Hook moved the Header`);
+    assert.deepEqual(moved, base, `${mode}: moving the Hook moved the Header`);
+  }
+});
+
+test('the Header is stable while scrubbing, in either mode', () => {
+  for (const mode of MODES) {
+    const boxes = [0, 0.5, 6.99, 7, 7.01, 8.8, 30].map(
+      (t) => layoutOverlays({ header: headerIn(mode), hook: hook({ durationSec: 7 }), currentTime: t }).header,
+    );
+    for (const box of boxes) assert.deepEqual(box, boxes[0]);
+  }
+});
+
+test('the layout reports the mode and canvas it used', () => {
+  for (const mode of MODES) {
+    const layout = layoutOverlays({ header: headerIn(mode), hook: hook() });
+    assert.equal(layout.mode, mode);
+    assert.equal(layout.canvas.mode, mode);
+    assert.equal(layout.header.mode, mode);
+    assert.equal(layout.hook.mode, mode);
+  }
+});
+
+test('an unknown mode degrades to the accepted default rather than breaking layout', () => {
+  const layout = layoutOverlays({ header: headerIn('nonsense'), hook: hook() });
+  assert.equal(layout.mode, 'overlay');
+  assert.equal(layout.canvas.videoTopPct, 0);
+  assert.equal(overlaysCollide(layout), false);
 });

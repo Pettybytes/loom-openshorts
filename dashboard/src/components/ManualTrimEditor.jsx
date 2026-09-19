@@ -129,6 +129,9 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // Header rich text (range styling) — the SAME model as the hook, stored as its
   // own record so a plain-string header keeps hydrating exactly as before.
   const [headerRich, setHeaderRich] = useState({ text: '', base: { color: null, font: null }, spans: [] });
+  // Layout mode for the on-video Header: 'overlay' (draw over the video — the
+  // accepted default) or 'dedicated' (a real reserved black band above it).
+  const [headerRegion, setHeaderRegion] = useState('overlay');
   const [showHeaderModal, setShowHeaderModal] = useState(false);
   // Selection made in the INLINE header field, carried into the header editor so
   // the range interaction works from either entry point. Sticky, because the
@@ -310,6 +313,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           if (to.background) setTitleOverlayBackground(to.background);
           if (to.background_color) setTitleOverlayBackgroundColor(to.background_color);
           if (to.alignment) setTitleOverlayAlignment(to.alignment);
+          // Absent on drafts saved before the mode existed -> accepted default.
+          setHeaderRegion(to.region === 'dedicated' ? 'dedicated' : 'overlay');
         }
         // Restore persisted Hook rich text (range styling) + entrance. Absent
         // on legacy drafts, where the plain `hook` string still hydrates.
@@ -462,6 +467,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     hook_duration: hookDuration, hook_entrance: hookEntrance,
     title_overlay: {
       enabled: titleOverlayEnabled, text: titleOverlayText, position: titleOverlayPosition,
+      region: headerRegion,
       alignment: titleOverlayAlignment, font_family: titleOverlayFontFamily,
       font_size: titleOverlayFontSize, text_color: titleOverlayColor,
       background: titleOverlayBackground, background_color: titleOverlayBackgroundColor,
@@ -471,7 +477,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     hookPosition, hookSize, hookStyle, hookDuration, hookEntrance,
     titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayAlignment,
     titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor,
-    titleOverlayBackground, titleOverlayBackgroundColor,
+    titleOverlayBackground, titleOverlayBackgroundColor, headerRegion,
   ]);
 
   // --- 3b. Debounced draft autosave ----------------------------------------
@@ -501,6 +507,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         enabled: titleOverlayEnabled,
         text: titleOverlayText,
         position: titleOverlayPosition,
+        region: headerRegion,
         font_family: titleOverlayFontFamily,
         font_size: titleOverlayFontSize,
         text_color: titleOverlayColor,
@@ -731,6 +738,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
               ? { text: titleOverlayText.trim(), base: { ...headerRich.base }, spans: headerRich.spans.map((s) => ({ ...s })) }
               : null,
             title_overlay: titleOverlayEnabled && titleOverlayText.trim() ? {
+              region: headerRegion,
             text: titleOverlayText.trim(), position: titleOverlayPosition, font_family: titleOverlayFontFamily,
             font_size: titleOverlayFontSize, text_color: titleOverlayColor, background: titleOverlayBackground,
             background_color: titleOverlayBackgroundColor, alignment: titleOverlayAlignment,
@@ -825,6 +833,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
               videoRef={videoRef}
               header={previewState.header}
               hook={previewState.hook}
+              region={headerRegion}
               currentTime={videoTime}
               onTimeUpdate={setVideoTime}
               maxWidth={420}
@@ -875,6 +884,14 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                       onMouseUp={syncHeaderInlineSelection}
                       placeholder="Text overlaid in the top black region"
                       className="input-field" />
+                    <label className="block text-xs text-muted">
+                      <span className="eyebrow block mb-1">header region</span>
+                      <select value={headerRegion} onChange={(e) => setHeaderRegion(e.target.value)}
+                        className="input-field !py-1.5">
+                        <option value="overlay">overlay — text over the video (default)</option>
+                        <option value="dedicated">dedicated black region above the video</option>
+                      </select>
+                    </label>
                     <div className="grid grid-cols-2 gap-2">
                       <select value={titleOverlayPosition} onChange={(e) => setTitleOverlayPosition(e.target.value)} className="input-field !py-1.5">
                         <option value="top">top region</option>
@@ -1180,6 +1197,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           initialText={titleOverlayText}
           initialRich={headerRich}
           initialSelection={headerInlineSelection}
+          initialRegion={headerRegion}
           initialPosition={titleOverlayPosition}
           initialAlignment={titleOverlayAlignment}
           initialFontFamily={titleOverlayFontFamily}

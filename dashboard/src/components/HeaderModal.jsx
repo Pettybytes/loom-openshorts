@@ -28,7 +28,7 @@ import { headerUsableBand } from '../lib/overlayLayout';
 export default function HeaderModal({
     isOpen, onClose, onApply,
     videoUrl,
-    initialText, initialRich, initialSelection,
+    initialText, initialRich, initialSelection, initialRegion,
     initialPosition, initialAlignment,
     initialFontFamily, initialFontSize, initialColor,
     initialBackground, initialBackgroundColor,
@@ -117,6 +117,7 @@ export default function HeaderModal({
                         videoUrl={videoUrl}
                         header={previewHeader}
                         hook={hookPreview || null}
+                        region={initialRegion || 'overlay'}
                         currentTime={currentTime}
                         onTimeUpdate={setCurrentTime}
                         maxWidth={340}

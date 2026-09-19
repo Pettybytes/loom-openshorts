@@ -83,6 +83,10 @@ export function buildPreviewState(draft) {
   const headerModel = {
     enabled: !!to.enabled && headerRich.text.trim().length > 0,
     text: headerRich.text,
+    // Layout mode: 'overlay' (draw over the video; accepted default) or
+    // 'dedicated' (a real reserved black band above the video). Normalised here
+    // rather than imported from overlayLayout, which depends on this module.
+    region: to.region === 'dedicated' ? 'dedicated' : 'overlay',
     base: headerRich.base,
     spans: headerRich.spans,
     runs: buildRuns(headerRich.text, headerRich.spans),
@@ -168,6 +172,7 @@ export function headerRenderPayload(state) {
     enabled: true,
     text: header.text,
     position: header.position,
+    region: header.region === 'dedicated' ? 'dedicated' : 'overlay',
     alignment: header.alignment,
     font_family: header.fontFamily,
     font_size: header.fontSize,
@@ -193,4 +198,13 @@ export function richDraftFields(prefix, rich) {
     ? { text: value.text, base: { ...value.base }, spans: value.spans.map((s) => ({ ...s })) }
     : null;
   return { [`${prefix}_rich`]: record };
+}
+
+/**
+ * The draft fields that persist one Header's layout mode. Written inside the
+ * EXISTING `title_overlay` record (no new top-level state), so a draft saved
+ * before the mode existed simply reads back as the accepted default.
+ */
+export function headerRegionField(region) {
+  return { region: region === 'dedicated' ? 'dedicated' : 'overlay' };
 }

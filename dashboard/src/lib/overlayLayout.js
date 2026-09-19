@@ -23,8 +23,60 @@
 
 import { hookVisibleAt } from './editorPreviewState.js';
 
-/** Dedicated upper black region, in % of frame height. */
-export const HEADER_REGION = Object.freeze({ top: 0, bottom: 14 });
+/** Dedicated upper black region, in % of frame height (the "overlay" mode band). */
+export const HEADER_REGION_BOTTOM_PCT = 14;
+export const HEADER_REGION = Object.freeze({ top: 0, bottom: HEADER_REGION_BOTTOM_PCT });
+
+/**
+ * The two legitimate Header layout modes.
+ *
+ *   'overlay'   — the Header draws over the video inside a top band. Accepted
+ *                 geometry; the DEFAULT.
+ *   'dedicated' — the composition reserves a real black canvas band at the top
+ *                 of the frame and the video is drawn below it.
+ *
+ * NOTE for future work: 'dedicated' was never a persisted concept. The old
+ * black band was an artifact of the main preview box having no aspect ratio (a
+ * taller-than-video container letterboxed the video, and the header band landed
+ * in that letterbox). Commit 41c8d9c pinned the frame to the video and removed
+ * it. This flag is the explicit, persisted replacement for that accident.
+ */
+export const HEADER_REGION_MODES = Object.freeze(['overlay', 'dedicated']);
+export const DEFAULT_HEADER_REGION = 'overlay';
+
+/** Share of the CANVAS height given to the dedicated black band. */
+export const DEDICATED_CANVAS_PCT = 18;
+
+/** Coerce anything into a known mode; unknown/absent -> the accepted default. */
+export function normalizeHeaderRegion(value) {
+  return value === 'dedicated' ? 'dedicated' : DEFAULT_HEADER_REGION;
+}
+
+/** The Header's region for a mode, in % of the CANVAS height. */
+export function headerRegionFor(mode) {
+  return normalizeHeaderRegion(mode) === 'dedicated'
+    ? { top: 0, bottom: DEDICATED_CANVAS_PCT }
+    : { top: HEADER_REGION.top, bottom: HEADER_REGION.bottom };
+}
+
+/**
+ * The canvas for a mode: in 'dedicated' the canvas is taller than the video, so
+ * the black band is real compositional space rather than an overlay. In
+ * 'overlay' the canvas IS the video (canvasAspect === videoAspect), which keeps
+ * the accepted geometry identical.
+ */
+export function canvasLayout(mode, videoAspect = FRAME_ASPECT) {
+  const resolved = normalizeHeaderRegion(mode);
+  const videoTopPct = resolved === 'dedicated' ? DEDICATED_CANVAS_PCT : 0;
+  const videoHeightPct = 100 - videoTopPct;
+  return {
+    mode: resolved,
+    videoTopPct,
+    videoHeightPct,
+    videoAspect,
+    canvasAspect: videoAspect * (videoHeightPct / 100),
+  };
+}
 
 /** The video region, in % of frame height. Starts below HEADER_REGION. */
 export const HOOK_REGION = Object.freeze({ top: 16, bottom: 100 });
@@ -58,34 +110,36 @@ function clamp(value, lo, hi) {
 }
 
 /** The Header's band, in frame %. */
-export function headerBand() {
+export function headerBand(mode = DEFAULT_HEADER_REGION) {
+  const region = headerRegionFor(mode);
   return {
-    topPct: HEADER_REGION.top,
-    heightPct: HEADER_REGION.bottom - HEADER_REGION.top,
+    topPct: region.top,
+    heightPct: region.bottom - region.top,
   };
 }
 
 /**
  * The Header's USABLE band: its region minus the safe inset at both edges.
- * This is what the Header is actually positioned and centred within, and what
- * bounds a large rich-text range.
+ * This is what the Header is positioned and centred within, and what bounds a
+ * large rich-text range.
  */
-export function headerUsableBand() {
-  const regionHeight = HEADER_REGION.bottom - HEADER_REGION.top;
+export function headerUsableBand(mode = DEFAULT_HEADER_REGION) {
+  const region = headerRegionFor(mode);
+  const regionHeight = region.bottom - region.top;
   const inset = Math.min(HEADER_SAFE_INSET_PCT, regionHeight / 3);
   return {
-    topPct: HEADER_REGION.top + inset,
-    bottomPct: HEADER_REGION.bottom - inset,
+    topPct: region.top + inset,
+    bottomPct: region.bottom - inset,
     heightPct: regionHeight - (2 * inset),
     insetPct: inset,
   };
 }
 
 /** Resolve a Header position to a frame-% anchor, clamped into the USABLE band. */
-export function headerAnchorPct(position) {
+export function headerAnchorPct(position, mode = DEFAULT_HEADER_REGION) {
+  const usable = headerUsableBand(mode);
   const requested = HEADER_ANCHOR_PCT[position];
-  const anchor = requested == null ? HEADER_ANCHOR_PCT.top : requested;
-  const usable = headerUsableBand();
+  const anchor = requested == null ? usable.topPct : requested;
   return clamp(anchor, usable.topPct, usable.bottomPct);
 }
 
@@ -93,17 +147,26 @@ export function headerAnchorPct(position) {
  * The Header's offset from the top of its BAND, in band-relative % — this is
  * literally what the renderer feeds to CSS `top` inside the band element.
  */
-export function headerInnerTopPct(position) {
-  const band = headerBand();
-  const anchor = headerAnchorPct(position);
+export function headerInnerTopPct(position, mode = DEFAULT_HEADER_REGION) {
+  const band = headerBand(mode);
+  const anchor = headerAnchorPct(position, mode);
   return ((anchor - band.topPct) / band.heightPct) * 100;
 }
 
-/** Resolve a Hook position to a frame-% anchor, clamped into its region. */
-export function hookAnchorPct(position) {
+/**
+ * Resolve a Hook position to a canvas-% anchor inside the VIDEO area.
+ *
+ * The Hook is placed relative to the VIDEO region rather than the canvas, so its
+ * relative placement is identical in both modes — and in 'dedicated' it begins
+ * below the black band, which is what guarantees it can never collide with the
+ * Header region.
+ */
+export function hookAnchorPct(position, mode = DEFAULT_HEADER_REGION) {
+  const canvas = canvasLayout(mode);
   const requested = HOOK_ANCHOR_PCT[position];
-  const anchor = requested == null ? HOOK_ANCHOR_PCT.top : requested;
-  return clamp(anchor, HOOK_REGION.top, HOOK_REGION.bottom);
+  const fraction = requested == null ? HOOK_ANCHOR_PCT.top : requested;
+  const inCanvas = canvas.videoTopPct + (canvas.videoHeightPct / 100) * fraction;
+  return clamp(inCanvas, canvas.videoTopPct, 100);
 }
 
 /**
@@ -114,18 +177,20 @@ export function hookAnchorPct(position) {
 export function headerBox(header) {
   if (!header?.enabled) return null;
   const position = header.position || 'top';
-  const band = headerBand();
-  const usable = headerUsableBand();
-  const topPct = headerAnchorPct(position);
+  const mode = normalizeHeaderRegion(header.region);
+  const band = headerBand(mode);
+  const usable = headerUsableBand(mode);
+  const topPct = headerAnchorPct(position, mode);
   return {
     region: 'header',
+    mode,
     position,
     // 'top' (the default) is CENTRED inside the usable band; 'upper' hugs the
     // safe top inset. Either way the text stays off both edges.
     align: HEADER_ALIGN[position] ?? HEADER_ALIGN.top,
     topPct,
-    bottomPct: HEADER_REGION.bottom,
-    heightPct: HEADER_REGION.bottom - topPct,
+    bottomPct: band.topPct + band.heightPct,
+    heightPct: (band.topPct + band.heightPct) - topPct,
     usable,
     // Where the usable band starts inside the band element, as a % of the band:
     // literally what the renderer feeds to CSS top/bottom.
@@ -135,13 +200,14 @@ export function headerBox(header) {
 }
 
 /** The Hook's box. Null when the Hook is absent or outside its time window. */
-export function hookBox(hook, { visible = true } = {}) {
+export function hookBox(hook, { visible = true, mode = DEFAULT_HEADER_REGION } = {}) {
   if (!hook?.present || !visible) return null;
   const position = hook.position || 'top';
   return {
     region: 'hook',
+    mode: normalizeHeaderRegion(mode),
     position,
-    topPct: hookAnchorPct(position),
+    topPct: hookAnchorPct(position, mode),
     paddingPct: OVERLAY_PADDING_PCT,
   };
 }
@@ -159,9 +225,14 @@ export function hookVisibleAtTime(hook, currentTime) {
  * scrubbing and Hook visibility cannot move it.
  */
 export function layoutOverlays({ header, hook, currentTime = 0 } = {}) {
+  // One mode for the whole composition. It lives on the Header because that is
+  // the element whose placement it defines.
+  const mode = normalizeHeaderRegion(header?.region);
   return {
+    mode,
+    canvas: canvasLayout(mode),
     header: headerBox(header),
-    hook: hookBox(hook, { visible: hookVisibleAtTime(hook, currentTime) }),
+    hook: hookBox(hook, { visible: hookVisibleAtTime(hook, currentTime), mode }),
   };
 }
 
@@ -212,7 +283,12 @@ export function framePoint(viewportWidth, viewportHeight, topPct, leftPct = 50, 
  */
 export function normalizedPlacement(box) {
   if (!box) return null;
-  return { region: box.region, topPct: box.topPct, align: box.align ?? null };
+  return {
+    region: box.region,
+    mode: box.mode ?? null,
+    topPct: box.topPct,
+    align: box.align ?? null,
+  };
 }
 
 /** True when the two boxes would occupy the same vertical space. */
