@@ -5,9 +5,10 @@ import { apiFetch, setEditorSessionToken, clearEditorSessionToken, editorTokenFi
 import { realignCaptions } from '../lib/captionRealign';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
+import HeaderModal from './HeaderModal';
 import TextOverlayPreview from './TextOverlayPreview';
 import { buildPreviewState } from '../lib/editorPreviewState';
-import { normalizeRichHook, serializeHook, isEmptyBase } from '../lib/hookRichText';
+import { normalizeRich, serializeRich, isEmptyBase } from '../lib/richText';
 
 // Relative public paths: the editor is served from the same public origin as
 // the LOOM adapter (Caddy funnel), so the exchange/complete calls and the
@@ -123,6 +124,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // hook's text + ranges, shared by the modal, the preview and the burn.
   const [hookRich, setHookRich] = useState({ text: '', base: { color: null, font: null, size: null }, spans: [] });
   const [hookEntrance, setHookEntrance] = useState('spring');
+  // Header rich text (range styling) — the SAME model as the hook, stored as its
+  // own record so a plain-string header keeps hydrating exactly as before.
+  const [headerRich, setHeaderRich] = useState({ text: '', base: { color: null, font: null }, spans: [] });
+  const [showHeaderModal, setShowHeaderModal] = useState(false);
   // Preview clock — drives the hook's time visibility in the primary preview.
   const [videoTime, setVideoTime] = useState(0);
   const [instruction, setInstruction] = useState('');
@@ -302,8 +307,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         }
         // Restore persisted Hook rich text (range styling) + entrance. Absent
         // on legacy drafts, where the plain `hook` string still hydrates.
-        if (d0?.hook_rich != null) setHookRich(normalizeRichHook(d0.hook_rich));
+        if (d0?.hook_rich != null) setHookRich(normalizeRich(d0.hook_rich));
         if (d0?.hook_entrance) setHookEntrance(d0.hook_entrance);
+        // Restore persisted Header rich text the same way. Absent on legacy
+        // drafts, where the flat title_overlay fields stay the base style.
+        if (d0?.header_rich != null) setHeaderRich(normalizeRich(d0.header_rich));
 
         // Spoken captions: word-level blocks from the durable correction log.
         const capWords = Array.isArray(db.captions) ? db.captions : [];
@@ -442,6 +450,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // (metadata, never visual) stay explicitly distinct.
   const previewState = useMemo(() => buildPreviewState({
     title, hook, hook_rich: hookRich, social_caption: socialCaption,
+    header_rich: headerRich,
     caption_text: captionText, caption_position: captionPosition,
     hook_position: hookPosition, hook_size: hookSize, hook_style: hookStyle,
     hook_duration: hookDuration, hook_entrance: hookEntrance,
@@ -452,7 +461,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       background: titleOverlayBackground, background_color: titleOverlayBackgroundColor,
     },
   }), [
-    title, hook, hookRich, socialCaption, captionText, captionPosition,
+    title, hook, hookRich, headerRich, socialCaption, captionText, captionPosition,
     hookPosition, hookSize, hookStyle, hookDuration, hookEntrance,
     titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayAlignment,
     titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor,
@@ -480,7 +489,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       caption_effect: captionEffect, caption_base_opacity: captionBaseOpacity,
       hook_position: hookPosition, hook_size: hookSize,
       hook_style: hookStyle, hook_duration: hookDuration,
-      hook_rich: serializeHook(hookRich), hook_entrance: hookEntrance,
+      hook_rich: serializeRich(hookRich), hook_entrance: hookEntrance,
+      header_rich: serializeRich(headerRich),
       title_overlay: {
         enabled: titleOverlayEnabled,
         text: titleOverlayText,
@@ -581,7 +591,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             caption_effect: captionEffect, caption_base_opacity: captionBaseOpacity,
             hook_position: hookPosition, hook_size: hookSize,
             hook_style: hookStyle, hook_duration: hookDuration,
-            hook_rich: serializeHook(hookRich), hook_entrance: hookEntrance,
+            hook_rich: serializeRich(hookRich), hook_entrance: hookEntrance,
+            header_rich: serializeRich(headerRich),
             instruction,
           },
         }),
@@ -626,7 +637,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         // Clamp any ranges to the CURRENT text (the user may have edited the
         // text after styling it) before sending them to the renderer.
         const burnRichPayload = (() => {
-          const burnRich = normalizeRichHook({ text: hookText, base: hookRich.base, spans: hookRich.spans });
+          const burnRich = normalizeRich({ text: hookText, base: hookRich.base, spans: hookRich.spans });
           const payload = {};
           if (burnRich.spans.length) payload.spans = burnRich.spans;
           if (!isEmptyBase(burnRich.base)) payload.base = burnRich.base;
@@ -695,7 +706,12 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, framing, segments,
             // The durable record of the hook's range styling, so the render
             // contract keeps the same semantics the preview showed.
-            hook_rich: hookApplied ? serializeHook(normalizeRichHook({ text: hook.trim(), base: hookRich.base, spans: hookRich.spans })) : null,
+            hook_rich: hookApplied ? serializeRich(normalizeRich({ text: hook.trim(), base: hookRich.base, spans: hookRich.spans })) : null,
+            // The header's range styling, carried on the same durable record as
+            // the rest of the overlay so a render/reopen keeps the semantics.
+            header_rich: titleOverlayEnabled && titleOverlayText.trim() && (headerRich.spans.length || headerRich.base.color || headerRich.base.font)
+              ? { text: titleOverlayText.trim(), base: { ...headerRich.base }, spans: headerRich.spans.map((s) => ({ ...s })) }
+              : null,
             title_overlay: titleOverlayEnabled && titleOverlayText.trim() ? {
             text: titleOverlayText.trim(), position: titleOverlayPosition, font_family: titleOverlayFontFamily,
             font_size: titleOverlayFontSize, text_color: titleOverlayColor, background: titleOverlayBackground,
@@ -878,6 +894,17 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
                           className="input-field mt-1 h-9" />
                       </label>
                     </div>
+                    {/* SAME interaction model as the hook: select text, then give
+                        just that range its own colour / font / size. */}
+                    <button type="button" onClick={() => setShowHeaderModal(true)}
+                      className="w-full text-left input-field flex items-center justify-between gap-2">
+                      <span className="truncate">
+                        {headerRich.spans.length
+                          ? `${headerRich.spans.length} styled range${headerRich.spans.length === 1 ? '' : 's'}`
+                          : 'style selected text (ranges)…'}
+                      </span>
+                      <span className="readout shrink-0 text-muted">select text → colour · font · size</span>
+                    </button>
                   </>
                 )}
               </div>
@@ -1089,7 +1116,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             if (hookData.position) setHookPosition(hookData.position);
             if (hookData.size) setHookSize(hookData.size);
             if (hookData.style) setHookStyle(hookData.style);
-            if (hookData.rich) setHookRich(normalizeRichHook(hookData.rich));
+            if (hookData.rich) setHookRich(normalizeRich(hookData.rich));
             if (hookData.entranceAnimation) setHookEntrance(hookData.entranceAnimation);
             const dur = hookData.remotion?.displayDurationSec;
             if (Number.isFinite(dur)) setHookDuration(dur);
@@ -1111,6 +1138,33 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           hasCaptions
           serverRender
           burnedHook={hasBurnedHook ? hook : null}
+        />
+
+        <HeaderModal
+          isOpen={showHeaderModal}
+          onClose={() => setShowHeaderModal(false)}
+          onApply={(data) => {
+            if (data.text != null) {
+              setTitleOverlayText(data.text);
+              setTitleOverlayEnabled(!!data.enabled && data.text.trim().length > 0);
+            }
+            if (data.rich) setHeaderRich(normalizeRich(data.rich));
+            if (data.fontFamily) setTitleOverlayFontFamily(data.fontFamily);
+            if (Number.isFinite(data.fontSize)) setTitleOverlayFontSize(data.fontSize);
+            if (data.color) setTitleOverlayColor(data.color);
+            setShowHeaderModal(false);
+          }}
+          videoUrl={clipUrl}
+          initialText={titleOverlayText}
+          initialRich={headerRich}
+          initialPosition={titleOverlayPosition}
+          initialAlignment={titleOverlayAlignment}
+          initialFontFamily={titleOverlayFontFamily}
+          initialFontSize={titleOverlayFontSize}
+          initialColor={titleOverlayColor}
+          initialBackground={titleOverlayBackground}
+          initialBackgroundColor={titleOverlayBackgroundColor}
+          hookPreview={previewState.hook}
         />
       </main>
     </div>

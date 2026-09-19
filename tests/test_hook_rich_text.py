@@ -215,6 +215,34 @@ class RenderTests(unittest.TestCase):
         img, _w, _h = render_image("base_style", HOOK_TEXT, base_style={"color": "#FFD600"})
         self.assertIn((255, 214, 0), colours_present(img))
 
+    def test_a_numeric_size_multiplier_scales_the_range(self):
+        # The editor sends a multiplier, not an S/M/L token. If this silently
+        # fell back to 1.0 the range would look styled in the preview and be
+        # un-styled in the burn — the exact drift this work exists to remove.
+        _img_a, _w_a, h_base = render_image("mult_base", HOOK_TEXT)
+        _img_b, _w_b, h_big = render_image("mult_130", HOOK_TEXT, spans=[
+            {"start": 0, "end": len(HOOK_TEXT), "size": 1.3},
+        ])
+        self.assertGreater(h_big, h_base)
+
+    def test_legacy_token_sizes_still_scale_the_range(self):
+        _img_a, _w_a, h_base = render_image("token_base", HOOK_TEXT)
+        _img_b, _w_b, h_token = render_image("token_large", HOOK_TEXT, spans=[
+            {"start": 0, "end": len(HOOK_TEXT), "size": "L"},
+        ])
+        self.assertGreater(h_token, h_base)
+
+    def test_size_multiplier_is_tolerant_and_never_a_silent_no_op(self):
+        self.assertEqual(hooks._size_multiplier(None), 1.0)
+        self.assertEqual(hooks._size_multiplier(""), 1.0)
+        self.assertEqual(hooks._size_multiplier("L"), 1.3)
+        self.assertEqual(hooks._size_multiplier("l"), 1.3)
+        self.assertEqual(hooks._size_multiplier(1.375), 1.375)
+        self.assertEqual(hooks._size_multiplier(0), 1.0)
+        self.assertEqual(hooks._size_multiplier(-2), 1.0)
+        self.assertEqual(hooks._size_multiplier("wide"), 1.0)
+        self.assertEqual(hooks._size_multiplier(1000), 10.0)
+
     def test_the_same_geometry_constants_are_used_by_both_paths(self):
         # 5% base font size and the 20px corner radius are shared; if either path
         # drifts, the burned hook stops matching the preview.

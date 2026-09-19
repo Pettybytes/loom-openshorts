@@ -12,7 +12,7 @@
  * by the S/M/L vocabulary the UI already exposes.
  */
 
-import { SIZE_SCALE } from './hookRichText.js';
+import { SIZE_SCALE } from './richText.js';
 
 export { SIZE_SCALE };
 

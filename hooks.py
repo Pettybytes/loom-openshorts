@@ -216,6 +216,30 @@ HOOK_STYLES = {
 _SIZE_SCALE = {"S": 0.8, "M": 1.0, "L": 1.3}
 _STYLE_PROPERTIES = ("color", "font", "size")
 
+
+def _size_multiplier(value):
+    """Span size -> multiplier of the element's base font size.
+
+    The editor sends a NUMBER (a range size is a multiplier, so the Header's px
+    targets and the Hook's S/M/L vocabulary both survive). The legacy S/M/L
+    tokens are still accepted so spans persisted by the earlier release keep
+    working. Anything unusable falls back to 1.0 — a bad value can never resize
+    text, and it can never silently no-op a real size either.
+    """
+    if value is None or value == "":
+        return 1.0
+    if isinstance(value, str):
+        token = _SIZE_SCALE.get(value.upper())
+        if token is not None:
+            return token
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if not (n > 0):
+        return 1.0
+    return min(10.0, max(0.1, n))
+
 # Font files probed per family. The shipped Noto Serif Bold is the documented
 # fallback, and callers can learn which family was ACTUALLY used rather than
 # silently pretending the requested one was honoured.
@@ -645,7 +669,7 @@ def _create_hook_image_styled(text, target_width, output_image_path, font_scale,
         width = 0
         height = 0
         for run_text, style in _styled_piece_runs(pieces, style_map, len(text)):
-            size = int(font_size * _SIZE_SCALE.get(style.get("size"), 1.0))
+            size = int(font_size * _size_multiplier(style.get("size")))
             face = font_for(style, size)
             run_w = _measure_width(draw, run_text, face, emoji_font)
             bbox = draw.textbbox((0, 0), run_text, font=face)

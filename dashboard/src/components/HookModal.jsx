@@ -3,14 +3,9 @@ import { Loader2 } from 'lucide-react';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import TextOverlayPreview from './TextOverlayPreview';
+import RangeStyleControls from './RangeStyleControls';
 import { buildPreviewState } from '../lib/editorPreviewState';
-import {
-    applyRangeStyle,
-    normalizeRichHook,
-    normalizeBase,
-    emptyBase,
-    HOOK_FONTS,
-} from '../lib/hookRichText';
+import { normalizeRich, emptyBase } from '../lib/richText';
 import {
     HOOK_STYLE_OPTIONS,
     HOOK_LOOKS,
@@ -26,25 +21,13 @@ function loadHookPrefs() {
     try { return JSON.parse(localStorage.getItem('os_hook_prefs')) || {}; } catch { return {}; }
 }
 
-const RANGE_SWATCHES = ['#FFD600', '#FF0000', '#FFFFFF', '#000000', '#00E5FF', '#00FF00'];
-
-/** Merge a patch into a base style; explicit null/'' clears that property. */
-function mergeBase(base, patch) {
-    const next = normalizeBase(base);
-    for (const key of ['color', 'font', 'size']) {
-        if (!(key in patch)) continue;
-        const v = patch[key];
-        next[key] = v == null || v === '' ? null : v;
-    }
-    return next;
-}
-
 /**
  * Hook modal — edits CONCEPT C (the on-video Hook) and nothing else.
  *
  * The preview is the shared <TextOverlayPreview>, fed by the same
- * `buildPreviewState()` conversion the primary editor preview uses, so the
- * modal and the primary preview cannot disagree.
+ * `buildPreviewState()` conversion the primary editor preview uses, so the modal
+ * and the primary preview cannot disagree. Range styling uses the shared
+ * RangeStyleControls — the same component the Header modal uses.
  */
 export default function HookModal({
     isOpen, onClose, onGenerate, onRemove, isProcessing,
@@ -61,14 +44,13 @@ export default function HookModal({
     const [entranceAnimation, setEntranceAnimation] = useState(initialEntrance || prefs.entranceAnimation || 'spring');
     const [displayDuration, setDisplayDuration] = useState(initialDuration || 5);
 
-    // Range-based rich text: base style + half-open [start, end) spans.
+    // Range-based rich text: base (colour/font) + half-open [start, end) spans.
     const [richBase, setRichBase] = useState(emptyBase());
     const [richSpans, setRichSpans] = useState([]);
     const [selection, setSelection] = useState({ start: 0, end: 0 });
     const [currentTime, setCurrentTime] = useState(0);
 
     const textareaRef = useRef(null);
-    const previewRef = useRef(null);
 
     // Hydrate the CURRENT hook whenever the modal opens (or its source hook
     // changes) so the user edits the existing burned hook rather than starting
@@ -81,7 +63,7 @@ export default function HookModal({
         setStyle(initialStyle || prefs.style || 'classic');
         setEntranceAnimation(initialEntrance || prefs.entranceAnimation || 'spring');
         setDisplayDuration(initialDuration || 5);
-        const hydrated = normalizeRichHook(initialRich);
+        const hydrated = normalizeRich(initialRich);
         setRichBase(hydrated.base);
         setRichSpans(hydrated.spans);
         setSelection({ start: 0, end: 0 });
@@ -113,80 +95,39 @@ export default function HookModal({
         displayDurationSec: displayDuration,
     };
 
-    const hasText = text.trim().length > 0;
-    const hasSelection = hasText && selection.end > selection.start;
-    const selectedText = hasSelection ? text.slice(selection.start, selection.end) : '';
-
     const syncSelection = () => {
         const el = textareaRef.current;
         if (!el) return;
         setSelection({ start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 });
     };
 
-    /**
-     * Apply a style patch to the selected range, or — with nothing selected —
-     * to the base/default style, which is the only honest reading of
-     * "no selection".
-     */
-    const applyPatch = (patch) => {
-        if (!hasText) return;
-        if (hasSelection) {
-            const next = applyRangeStyle({ text, base: richBase, spans: richSpans }, selection.start, selection.end, patch);
-            setRichSpans(next.spans);
-        } else {
-            setRichBase((b) => mergeBase(b, patch));
-        }
+    // One handler for both scopes: RangeStyleControls decides whether a patch
+    // targets the selected range or the hook's base style.
+    const handleRichChange = (next) => {
+        setRichBase(next.base);
+        setRichSpans(next.spans);
     };
-
-    const resetSelectionStyling = () => {
-        if (hasSelection) {
-            setRichSpans(applyRangeStyle({ text, base: richBase, spans: richSpans }, selection.start, selection.end, {
-                color: null, font: null, size: null,
-            }).spans);
-        } else {
-            setRichBase(emptyBase());
-        }
-    };
-
-    // What the range controls currently resolve to, for honest readouts.
-    const rangeReadout = hasSelection
-        ? `${selectedText.length} char${selectedText.length === 1 ? '' : 's'} · ${selection.start}–${selection.end}`
-        : 'no selection — controls set the default style';
 
     return (
         <Modal isOpen={isOpen} onClose={onClose} size="lg" eyebrow="EDITOR · HOOK" title="viral hook">
             <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview — the SAME overlay surface as the primary preview */}
                 <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
-                    {previewVideoUrl ? (
-                        <>
-                            <video
-                                ref={previewRef}
-                                src={previewVideoUrl}
-                                className="w-full h-full object-contain"
-                                controls
-                                muted
-                                playsInline
-                                autoPlay
-                                loop
-                                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                            />
-                            <TextOverlayPreview
-                                header={headerPreview}
-                                hook={previewState.hook}
-                                currentTime={currentTime}
-                            />
-                        </>
-                    ) : (
-                        <>
-                            <video src={previewVideoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
-                            <TextOverlayPreview
-                                header={headerPreview}
-                                hook={previewState.hook}
-                                currentTime={currentTime}
-                            />
-                        </>
-                    )}
+                    <video
+                        src={previewVideoUrl}
+                        className="w-full h-full object-contain"
+                        controls
+                        muted
+                        playsInline
+                        autoPlay
+                        loop
+                        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                    />
+                    <TextOverlayPreview
+                        header={headerPreview}
+                        hook={previewState.hook}
+                        currentTime={currentTime}
+                    />
                 </div>
 
                 {/* Right: Controls */}
@@ -214,74 +155,16 @@ export default function HookModal({
                             </p>
                         </div>
 
-                        {/* Selected-range styling */}
-                        <div className="border border-rule rounded-input p-3 space-y-3">
-                            <div>
-                                <p className="eyebrow mb-1">selected range</p>
-                                <p className="text-[11px] text-muted break-words">
-                                    {hasSelection ? <span className="text-ink">“{selectedText}”</span> : null} {rangeReadout}
-                                </p>
-                            </div>
-
-                            <div>
-                                <p className="eyebrow mb-1.5">Range colour</p>
-                                <div className="flex flex-wrap gap-1.5 items-center">
-                                    {RANGE_SWATCHES.map((c) => (
-                                        <button
-                                            key={c}
-                                            type="button"
-                                            disabled={!hasText}
-                                            onClick={() => applyPatch({ color: c })}
-                                            title={`colour ${c} for the selection`}
-                                            className="w-7 h-7 rounded border border-rule2 hover:border-[color:var(--color-accent)] disabled:opacity-40"
-                                            style={{ backgroundColor: c }}
-                                        />
-                                    ))}
-                                    <input
-                                        type="color"
-                                        disabled={!hasText}
-                                        value={hasSelection ? '#FFD600' : (richBase.color || '#FFD600')}
-                                        onChange={(e) => applyPatch({ color: e.target.value })}
-                                        title="custom colour"
-                                        className="input-field !w-14 !h-8 !p-0.5"
-                                    />
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2">
-                                <label className="text-[11px] text-muted">Range font
-                                    <select
-                                        disabled={!hasText}
-                                        value={hasSelection ? '' : (richBase.font || '')}
-                                        onChange={(e) => applyPatch({ font: e.target.value || null })}
-                                        className="input-field !py-1.5 mt-1"
-                                    >
-                                        <option value="">{hasSelection ? 'keep / inherit' : 'default'}</option>
-                                        {HOOK_FONTS.map((f) => <option key={f} value={f}>{f}</option>)}
-                                    </select>
-                                </label>
-                                <label className="text-[11px] text-muted">Range size
-                                    <select
-                                        disabled={!hasText}
-                                        value={hasSelection ? '' : (richBase.size || '')}
-                                        onChange={(e) => applyPatch({ size: e.target.value || null })}
-                                        className="input-field !py-1.5 mt-1"
-                                    >
-                                        <option value="">{hasSelection ? 'keep / inherit' : 'default'}</option>
-                                        {HOOK_SIZE_OPTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                                    </select>
-                                </label>
-                            </div>
-
-                            <button
-                                type="button"
-                                onClick={resetSelectionStyling}
-                                disabled={!hasText}
-                                className="text-xs text-muted underline underline-offset-2 hover:text-ink disabled:opacity-40"
-                            >
-                                {hasSelection ? 'clear styling on selection' : 'clear default styling'}
-                            </button>
-                        </div>
+                        {/* Shared range styling (identical component in the Header modal) */}
+                        <RangeStyleControls
+                            text={text}
+                            rich={{ text, base: richBase, spans: richSpans }}
+                            selection={selection}
+                            onChange={handleRichChange}
+                            sizeMode="token"
+                            baseFontPx={54}
+                            hint="Sizes are relative to the hook's own size, so a range can be larger or smaller without resizing the whole hook."
+                        />
 
                         {/* Style (whole-hook look) */}
                         <div>
@@ -329,7 +212,7 @@ export default function HookModal({
                             )}
                         </div>
 
-                        {/* Size Control */}
+                        {/* Size Control — the hook's own BASE size */}
                         <div>
                             <p className="eyebrow mb-2">Size</p>
                             <SegmentedControl
@@ -339,7 +222,7 @@ export default function HookModal({
                                 size="sm"
                             />
                             <p className="readout mt-1.5">
-                                base {Math.round((SIZE_SCALE[size] ?? 1) * 100)}% · ranges multiply on top
+                                base {Math.round((SIZE_SCALE[size] ?? 1) * 100)}% · range sizes multiply on top
                             </p>
                         </div>
 
