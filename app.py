@@ -4367,6 +4367,22 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
     return {"success": True, "new_video_url": new_url}
 
 
+class HookSpan(BaseModel):
+    """One half-open [start, end) character range with its own styling."""
+    start: int
+    end: int
+    color: Optional[str] = None   # '#RRGGBB'
+    font: Optional[str] = None    # family name; falls back to Noto Serif
+    size: Optional[str] = None    # S / M / L multiplier on the hook's size
+
+
+class HookBaseStyle(BaseModel):
+    """Default style applied to every character the spans don't override."""
+    color: Optional[str] = None
+    font: Optional[str] = None
+    size: Optional[str] = None
+
+
 class HookRequest(BaseModel):
     job_id: str
     clip_index: int
@@ -4376,6 +4392,10 @@ class HookRequest(BaseModel):
     size: Optional[str] = "M" # S, M, L
     duration_seconds: Optional[float] = None  # None = hook visible for the whole clip
     style: Optional[str] = "classic"  # classic/dark/yellow/red/outline/outline_yellow
+    # Selective rich text: per-range overrides + a base style. Absent on legacy
+    # requests, which renders exactly as before.
+    spans: Optional[List[HookSpan]] = None
+    base: Optional[HookBaseStyle] = None
     remove: Optional[bool] = False  # strip the burned hook instead of adding one
 
 @app.post("/api/hook")
@@ -4450,8 +4470,13 @@ async def add_hook(req: HookRequest, request: Request):
 
         try:
             # Run in thread pool
+            # Narrow the request to the rich-text fields hooks.py understands.
+            # `exclude_none` keeps a legacy payload byte-identical.
+            hook_spans = [s.model_dump(exclude_none=True) for s in (req.spans or [])] or None
+            hook_base_style = req.base.model_dump(exclude_none=True) if req.base else None
+
             def run_hook():
-                add_hook_to_video(input_path, req.text, output_path, position=req.position, font_scale=font_scale, duration=req.duration_seconds, style=req.style)
+                add_hook_to_video(input_path, req.text, output_path, position=req.position, font_scale=font_scale, duration=req.duration_seconds, style=req.style, spans=hook_spans, base_style=hook_base_style)
 
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, run_hook)

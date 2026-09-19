@@ -5,6 +5,9 @@ import { apiFetch, setEditorSessionToken, clearEditorSessionToken, editorTokenFi
 import { realignCaptions } from '../lib/captionRealign';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
+import TextOverlayPreview from './TextOverlayPreview';
+import { buildPreviewState } from '../lib/editorPreviewState';
+import { normalizeRichHook, serializeHook, isEmptyBase } from '../lib/hookRichText';
 
 // Relative public paths: the editor is served from the same public origin as
 // the LOOM adapter (Caddy funnel), so the exchange/complete calls and the
@@ -116,6 +119,12 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [hookSize, setHookSize] = useState('M');
   const [hookStyle, setHookStyle] = useState('classic');
   const [hookDuration, setHookDuration] = useState(5);
+  // Structured Hook rich text (range styling) — the ONE saved shape for a
+  // hook's text + ranges, shared by the modal, the preview and the burn.
+  const [hookRich, setHookRich] = useState({ text: '', base: { color: null, font: null, size: null }, spans: [] });
+  const [hookEntrance, setHookEntrance] = useState('spring');
+  // Preview clock — drives the hook's time visibility in the primary preview.
+  const [videoTime, setVideoTime] = useState(0);
   const [instruction, setInstruction] = useState('');
   const [title, setTitle] = useState('');
   const [hook, setHook] = useState('');
@@ -291,6 +300,10 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           if (to.background_color) setTitleOverlayBackgroundColor(to.background_color);
           if (to.alignment) setTitleOverlayAlignment(to.alignment);
         }
+        // Restore persisted Hook rich text (range styling) + entrance. Absent
+        // on legacy drafts, where the plain `hook` string still hydrates.
+        if (d0?.hook_rich != null) setHookRich(normalizeRichHook(d0.hook_rich));
+        if (d0?.hook_entrance) setHookEntrance(d0.hook_entrance);
 
         // Spoken captions: word-level blocks from the durable correction log.
         const capWords = Array.isArray(db.captions) ? db.captions : [];
@@ -423,6 +436,29 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const trimDurationSec = Number(trimEnd) - Number(trimStart);
   const trimInvalid = !Number.isFinite(trimDurationSec) || trimDurationSec <= 0;
 
+  // --- 3a. ONE preview state for every preview surface ---------------------
+  // The primary preview and the Hook modal both render from this object, so
+  // they cannot drift apart. Header (visual), Hook (visual) and Social Caption
+  // (metadata, never visual) stay explicitly distinct.
+  const previewState = useMemo(() => buildPreviewState({
+    title, hook, hook_rich: hookRich, social_caption: socialCaption,
+    caption_text: captionText, caption_position: captionPosition,
+    hook_position: hookPosition, hook_size: hookSize, hook_style: hookStyle,
+    hook_duration: hookDuration, hook_entrance: hookEntrance,
+    title_overlay: {
+      enabled: titleOverlayEnabled, text: titleOverlayText, position: titleOverlayPosition,
+      alignment: titleOverlayAlignment, font_family: titleOverlayFontFamily,
+      font_size: titleOverlayFontSize, text_color: titleOverlayColor,
+      background: titleOverlayBackground, background_color: titleOverlayBackgroundColor,
+    },
+  }), [
+    title, hook, hookRich, socialCaption, captionText, captionPosition,
+    hookPosition, hookSize, hookStyle, hookDuration, hookEntrance,
+    titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayAlignment,
+    titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor,
+    titleOverlayBackground, titleOverlayBackgroundColor,
+  ]);
+
   // --- 3b. Debounced draft autosave ----------------------------------------
   // Persist every editable field to the server as the user edits, so a refresh
   // or Activity reload restores the full draft (not just what was saved at
@@ -444,6 +480,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       caption_effect: captionEffect, caption_base_opacity: captionBaseOpacity,
       hook_position: hookPosition, hook_size: hookSize,
       hook_style: hookStyle, hook_duration: hookDuration,
+      hook_rich: serializeHook(hookRich), hook_entrance: hookEntrance,
       title_overlay: {
         enabled: titleOverlayEnabled,
         text: titleOverlayText,
@@ -470,7 +507,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }).catch(() => {});
     }, 700);
     return () => clearTimeout(t);
-  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, instruction]);
+  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction]);
 
   // --- 4. Apply caption + rerender + register + card -------------------------------
   const handleRerender = useCallback(async () => {
@@ -500,7 +537,9 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         || captionBaseOpacity !== 1.0;
 
       const hookChanged = (hook || '').trim() !== ''
-        || hookPosition !== 'top' || hookSize !== 'M' || hookStyle !== 'classic' || hookDuration !== 5;
+        || hookRich.spans.length > 0 || !isEmptyBase(hookRich.base)
+        || hookPosition !== 'top' || hookSize !== 'M' || hookStyle !== 'classic' || hookDuration !== 5
+        || hookEntrance !== 'spring';
 
       const caption_changes = {
         text: captionText,
@@ -542,6 +581,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             caption_effect: captionEffect, caption_base_opacity: captionBaseOpacity,
             hook_position: hookPosition, hook_size: hookSize,
             hook_style: hookStyle, hook_duration: hookDuration,
+            hook_rich: serializeHook(hookRich), hook_entrance: hookEntrance,
             instruction,
           },
         }),
@@ -583,10 +623,26 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       if (hookChanged && currentFile) {
         setProgress({ stage: 'hook', detail: 'Applying hook…' });
         const hookText = (hook || '').trim();
+        // Clamp any ranges to the CURRENT text (the user may have edited the
+        // text after styling it) before sending them to the renderer.
+        const burnRichPayload = (() => {
+          const burnRich = normalizeRichHook({ text: hookText, base: hookRich.base, spans: hookRich.spans });
+          const payload = {};
+          if (burnRich.spans.length) payload.spans = burnRich.spans;
+          if (!isEmptyBase(burnRich.base)) payload.base = burnRich.base;
+          return payload;
+        })();
         const hRes = await apiFetch('/api/hook', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(hookText
-            ? { job_id, clip_index, text: hookText, position: hookPosition, size: hookSize, style: hookStyle, duration_seconds: hookDuration, input_filename: currentFile }
+            ? {
+                job_id, clip_index, text: hookText, position: hookPosition,
+                size: hookSize, style: hookStyle, duration_seconds: hookDuration,
+                input_filename: currentFile,
+                // Range styling travels with the burn so the encoded hook uses
+                // the same semantics the preview showed.
+                ...burnRichPayload,
+              }
             : { job_id, clip_index, remove: true, input_filename: currentFile }),
         });
         if (hRes.ok) {
@@ -636,7 +692,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           trim_start: Number(trimStart), trim_end: Number(trimEnd),
           caption_changes, crop_reframe_changes,
           instruction: instruction.trim() || undefined, llm_assist_used: false,
-          edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, framing, segments, title_overlay: titleOverlayEnabled && titleOverlayText.trim() ? {
+          edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, framing, segments,
+            // The durable record of the hook's range styling, so the render
+            // contract keeps the same semantics the preview showed.
+            hook_rich: hookApplied ? serializeHook(normalizeRichHook({ text: hook.trim(), base: hookRich.base, spans: hookRich.spans })) : null,
+            title_overlay: titleOverlayEnabled && titleOverlayText.trim() ? {
             text: titleOverlayText.trim(), position: titleOverlayPosition, font_family: titleOverlayFontFamily,
             font_size: titleOverlayFontSize, text_color: titleOverlayColor, background: titleOverlayBackground,
             background_color: titleOverlayBackgroundColor, alignment: titleOverlayAlignment,
@@ -726,38 +786,20 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           {/* Preview column */}
           <div className="w-full lg:w-[min(42vw,420px)] bg-black shrink-0 aspect-[9/16] lg:aspect-auto lg:h-auto relative group/video mx-auto lg:mx-0">
             <video ref={videoRef} src={clipUrl} controls playsInline
+              onTimeUpdate={(e) => setVideoTime(e.currentTarget.currentTime)}
               className="w-full h-full object-contain" />
             <div className="absolute top-3 left-3">
               <span className="bg-black/70 text-ink font-mono text-micro uppercase px-2 py-1 rounded-full">
                 clip {Number(session?.clip_index ?? 0) + 1}
               </span>
             </div>
-            {titleOverlayEnabled && titleOverlayText.trim() && (
-              <div
-                className="absolute left-0 right-0 flex pointer-events-none"
-                style={{
-                  top: titleOverlayPosition === 'upper' ? '6%' : '14%',
-                  paddingLeft: '8%',
-                  paddingRight: '8%',
-                  justifyContent: titleOverlayAlignment === 'left' ? 'flex-start' : titleOverlayAlignment === 'right' ? 'flex-end' : 'center',
-                }}
-              >
-                <span
-                  style={{
-                    fontFamily: titleOverlayFontFamily,
-                    fontSize: `${titleOverlayFontSize * 0.4}px`,
-                    fontWeight: 700,
-                    color: titleOverlayColor,
-                    backgroundColor: titleOverlayBackground === 'none' ? 'transparent' : titleOverlayBackgroundColor,
-                    padding: titleOverlayBackground === 'none' ? 0 : '4px 10px',
-                    borderRadius: titleOverlayBackground === 'none' ? 0 : 6,
-                    textAlign: titleOverlayAlignment,
-                  }}
-                >
-                  {titleOverlayText}
-                </span>
-              </div>
-            )}
+            {/* THE authoritative overlay surface. Header and Hook both render
+                here, from the same preview state the Hook modal renders. */}
+            <TextOverlayPreview
+              header={previewState.header}
+              hook={previewState.hook}
+              currentTime={videoTime}
+            />
             {clipUrl == null && <p className="absolute inset-0 flex items-center justify-center text-xs text-muted">preview unavailable</p>}
           </div>
 
@@ -1047,6 +1089,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             if (hookData.position) setHookPosition(hookData.position);
             if (hookData.size) setHookSize(hookData.size);
             if (hookData.style) setHookStyle(hookData.style);
+            if (hookData.rich) setHookRich(normalizeRichHook(hookData.rich));
+            if (hookData.entranceAnimation) setHookEntrance(hookData.entranceAnimation);
             const dur = hookData.remotion?.displayDurationSec;
             if (Number.isFinite(dur)) setHookDuration(dur);
             setShowHookModal(false);
@@ -1055,10 +1099,13 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           videoUrl={clipUrl}
           cleanVideoUrl={cleanSourceUrl}
           initialText={hook}
+          initialRich={hookRich}
+          headerPreview={previewState.header}
           initialPosition={hookPosition}
           initialSize={hookSize}
           initialStyle={hookStyle}
           initialDuration={hookDuration}
+          initialEntrance={hookEntrance}
           durationInSeconds={clipDurationSec || 30}
           existingSubtitles={null}
           hasCaptions

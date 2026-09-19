@@ -1,37 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Loader2 } from 'lucide-react';
-import RemotionPreview from './RemotionPreview';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
-
-const ENTRANCE_OPTIONS = [
-    { value: 'spring', label: 'Bounce' },
-    { value: 'fade', label: 'Fade' },
-    { value: 'slide-up', label: 'Slide Up' },
-    { value: 'none', label: 'None' },
-];
-
-// Must mirror hooks.py HOOK_STYLES.
-const HOOK_STYLES = [
-    { value: 'classic', label: 'Classic', box: 'rgba(255,255,255,0.94)', text: '#000' },
-    { value: 'dark', label: 'Dark', box: 'rgba(18,18,20,0.92)', text: '#fff' },
-    { value: 'yellow', label: 'Yellow', box: 'rgba(255,214,0,0.96)', text: '#000' },
-    { value: 'red', label: 'Red', box: 'rgba(220,38,38,0.96)', text: '#fff' },
-    { value: 'outline', label: 'Outline', box: 'transparent', text: '#fff', outline: true },
-    { value: 'outline_yellow', label: 'Outline+', box: 'transparent', text: '#FFD600', outline: true },
-];
-
-const POSITION_OPTIONS = [
-    { value: 'top', label: 'top' },
-    { value: 'center', label: 'center' },
-    { value: 'bottom', label: 'bottom' },
-];
-
-const SIZE_OPTIONS = [
-    { value: 'S', label: 'Small' },
-    { value: 'M', label: 'Medium' },
-    { value: 'L', label: 'Large' },
-];
+import TextOverlayPreview from './TextOverlayPreview';
+import { buildPreviewState } from '../lib/editorPreviewState';
+import {
+    applyRangeStyle,
+    normalizeRichHook,
+    normalizeBase,
+    emptyBase,
+    HOOK_FONTS,
+} from '../lib/hookRichText';
+import {
+    HOOK_STYLE_OPTIONS,
+    HOOK_LOOKS,
+    HOOK_POSITION_OPTIONS,
+    HOOK_SIZE_OPTIONS,
+    HOOK_ENTRANCE_OPTIONS,
+    SIZE_SCALE,
+} from '../lib/hookStyles';
 
 // Last-used hook settings, restored on the next open (style always reset to
 // classic otherwise, which users read as the picker being broken).
@@ -39,26 +26,77 @@ function loadHookPrefs() {
     try { return JSON.parse(localStorage.getItem('os_hook_prefs')) || {}; } catch { return {}; }
 }
 
-export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, cleanVideoUrl, initialText, initialPosition, initialSize, initialStyle, initialDuration, durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook }) {
+const RANGE_SWATCHES = ['#FFD600', '#FF0000', '#FFFFFF', '#000000', '#00E5FF', '#00FF00'];
+
+/** Merge a patch into a base style; explicit null/'' clears that property. */
+function mergeBase(base, patch) {
+    const next = normalizeBase(base);
+    for (const key of ['color', 'font', 'size']) {
+        if (!(key in patch)) continue;
+        const v = patch[key];
+        next[key] = v == null || v === '' ? null : v;
+    }
+    return next;
+}
+
+/**
+ * Hook modal — edits CONCEPT C (the on-video Hook) and nothing else.
+ *
+ * The preview is the shared <TextOverlayPreview>, fed by the same
+ * `buildPreviewState()` conversion the primary editor preview uses, so the
+ * modal and the primary preview cannot disagree.
+ */
+export default function HookModal({
+    isOpen, onClose, onGenerate, onRemove, isProcessing,
+    videoUrl, cleanVideoUrl,
+    initialText, initialRich, headerPreview,
+    initialPosition, initialSize, initialStyle, initialDuration, initialEntrance,
+    durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook,
+}) {
     const prefs = loadHookPrefs();
     const [text, setText] = useState(initialText || 'POV: You are using the viral hook feature');
     const [position, setPosition] = useState(initialPosition || prefs.position || 'top');
     const [size, setSize] = useState(initialSize || prefs.size || 'M');
     const [style, setStyle] = useState(initialStyle || prefs.style || 'classic');
-    const [entranceAnimation, setEntranceAnimation] = useState(prefs.entranceAnimation || 'spring');
+    const [entranceAnimation, setEntranceAnimation] = useState(initialEntrance || prefs.entranceAnimation || 'spring');
     const [displayDuration, setDisplayDuration] = useState(initialDuration || 5);
+
+    // Range-based rich text: base style + half-open [start, end) spans.
+    const [richBase, setRichBase] = useState(emptyBase());
+    const [richSpans, setRichSpans] = useState([]);
+    const [selection, setSelection] = useState({ start: 0, end: 0 });
+    const [currentTime, setCurrentTime] = useState(0);
+
+    const textareaRef = useRef(null);
+    const previewRef = useRef(null);
 
     // Hydrate the CURRENT hook whenever the modal opens (or its source hook
     // changes) so the user edits the existing burned hook rather than starting
     // from unrelated/default text. Runs on every open, not just first mount.
     useEffect(() => {
-      if (!isOpen) return;
-      setText(initialText || 'POV: You are using the viral hook feature');
-      setPosition(initialPosition || prefs.position || 'top');
-      setSize(initialSize || prefs.size || 'M');
-      setStyle(initialStyle || prefs.style || 'classic');
-      setDisplayDuration(initialDuration || 5);
-    }, [isOpen, initialText, initialPosition, initialSize, initialStyle, initialDuration]);
+        if (!isOpen) return;
+        setText(initialText || 'POV: You are using the viral hook feature');
+        setPosition(initialPosition || prefs.position || 'top');
+        setSize(initialSize || prefs.size || 'M');
+        setStyle(initialStyle || prefs.style || 'classic');
+        setEntranceAnimation(initialEntrance || prefs.entranceAnimation || 'spring');
+        setDisplayDuration(initialDuration || 5);
+        const hydrated = normalizeRichHook(initialRich);
+        setRichBase(hydrated.base);
+        setRichSpans(hydrated.spans);
+        setSelection({ start: 0, end: 0 });
+    }, [isOpen, initialText, initialRich, initialPosition, initialSize, initialStyle, initialDuration, initialEntrance]);
+
+    // Live preview model — the same conversion the primary preview uses.
+    const previewState = useMemo(() => buildPreviewState({
+        hook: text,
+        hook_rich: { text, base: richBase, spans: richSpans },
+        hook_position: position,
+        hook_size: size,
+        hook_style: style,
+        hook_duration: displayDuration,
+        hook_entrance: entranceAnimation,
+    }), [text, richBase, richSpans, position, size, style, displayDuration, entranceAnimation]);
 
     if (!isOpen) return null;
 
@@ -66,7 +104,6 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
     // CLEAN source (no burned hook underneath) — replacement, never stacking.
     const previewVideoUrl = cleanVideoUrl || videoUrl;
 
-    // Build hook config for Remotion preview
     const hookConfig = {
         text: text || 'Enter your text...',
         position,
@@ -76,57 +113,78 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
         displayDurationSec: displayDuration,
     };
 
-    const useRemotionPreview = !!previewVideoUrl;
+    const hasText = text.trim().length > 0;
+    const hasSelection = hasText && selection.end > selection.start;
+    const selectedText = hasSelection ? text.slice(selection.start, selection.end) : '';
 
-    // Fallback preview logic (same as original)
-    const getPositionClass = () => {
-        switch (position) {
-            case 'center': return 'items-center justify-center';
-            case 'bottom': return 'items-center justify-end pb-[20%]';
-            case 'top': default: return 'items-center justify-start pt-[20%]';
+    const syncSelection = () => {
+        const el = textareaRef.current;
+        if (!el) return;
+        setSelection({ start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 });
+    };
+
+    /**
+     * Apply a style patch to the selected range, or — with nothing selected —
+     * to the base/default style, which is the only honest reading of
+     * "no selection".
+     */
+    const applyPatch = (patch) => {
+        if (!hasText) return;
+        if (hasSelection) {
+            const next = applyRangeStyle({ text, base: richBase, spans: richSpans }, selection.start, selection.end, patch);
+            setRichSpans(next.spans);
+        } else {
+            setRichBase((b) => mergeBase(b, patch));
         }
     };
 
-    const getSizeStyle = () => {
-        switch (size) {
-            case 'S': return { fontSize: '14px', maxWidth: '80%' };
-            case 'L': return { fontSize: '24px', maxWidth: '95%' };
-            case 'M': default: return { fontSize: '18px', maxWidth: '90%' };
+    const resetSelectionStyling = () => {
+        if (hasSelection) {
+            setRichSpans(applyRangeStyle({ text, base: richBase, spans: richSpans }, selection.start, selection.end, {
+                color: null, font: null, size: null,
+            }).spans);
+        } else {
+            setRichBase(emptyBase());
         }
     };
+
+    // What the range controls currently resolve to, for honest readouts.
+    const rangeReadout = hasSelection
+        ? `${selectedText.length} char${selectedText.length === 1 ? '' : 's'} · ${selection.start}–${selection.end}`
+        : 'no selection — controls set the default style';
 
     return (
         <Modal isOpen={isOpen} onClose={onClose} size="lg" eyebrow="EDITOR · HOOK" title="viral hook">
             <div className="flex flex-col md:flex-row gap-6">
-                {/* Left: Preview */}
+                {/* Left: Preview — the SAME overlay surface as the primary preview */}
                 <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
-                    {useRemotionPreview ? (
-                        <RemotionPreview
-                            videoUrl={previewVideoUrl}
-                            durationInSeconds={durationInSeconds || 30}
-                            hook={hookConfig}
-                            subtitles={existingSubtitles || null}
-                        />
+                    {previewVideoUrl ? (
+                        <>
+                            <video
+                                ref={previewRef}
+                                src={previewVideoUrl}
+                                className="w-full h-full object-contain"
+                                controls
+                                muted
+                                playsInline
+                                autoPlay
+                                loop
+                                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                            />
+                            <TextOverlayPreview
+                                header={headerPreview}
+                                hook={previewState.hook}
+                                currentTime={currentTime}
+                            />
+                        </>
                     ) : (
                         <>
                             <video src={previewVideoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
-                            <div className={`absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col h-full ${getPositionClass()}`}>
-                                <div
-                                    className="text-black font-bold px-3 py-2 rounded-xl shadow-2xl text-center whitespace-pre-wrap transition-all duration-200"
-                                    style={{
-                                        ...getSizeStyle(),
-                                        backgroundColor: 'rgba(255, 255, 255, 0.82)',
-                                        fontFamily: 'Noto Serif, serif',
-                                        boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
-                                        paddingTop: '10px',
-                                        paddingBottom: '10px',
-                                        paddingLeft: '12px',
-                                        paddingRight: '12px'
-                                    }}
-                                >
-                                    {text || "Enter your text..."}
-                                </div>
-                            </div>
+                            <TextOverlayPreview
+                                header={headerPreview}
+                                hook={previewState.hook}
+                                currentTime={currentTime}
+                            />
                         </>
                     )}
                 </div>
@@ -138,38 +196,119 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                         <div>
                             <p className="eyebrow mb-2">Text</p>
                             <textarea
+                                ref={textareaRef}
                                 value={text}
                                 onChange={(e) => setText(e.target.value)}
+                                onSelect={syncSelection}
+                                onKeyUp={syncSelection}
+                                onClick={syncSelection}
+                                onBlur={syncSelection}
                                 rows={4}
                                 className="input-field resize-none font-serif"
                                 style={{ fontFamily: 'Noto Serif, serif' }}
                                 placeholder="Enter text that will stop the scroll..."
                             />
+                            <p className="text-[11px] text-muted mt-1.5 leading-relaxed">
+                                Select any part of the text to give just that range its
+                                own colour, font and size.
+                            </p>
                         </div>
 
-                        {/* Style (new) */}
+                        {/* Selected-range styling */}
+                        <div className="border border-rule rounded-input p-3 space-y-3">
+                            <div>
+                                <p className="eyebrow mb-1">selected range</p>
+                                <p className="text-[11px] text-muted break-words">
+                                    {hasSelection ? <span className="text-ink">“{selectedText}”</span> : null} {rangeReadout}
+                                </p>
+                            </div>
+
+                            <div>
+                                <p className="eyebrow mb-1.5">Range colour</p>
+                                <div className="flex flex-wrap gap-1.5 items-center">
+                                    {RANGE_SWATCHES.map((c) => (
+                                        <button
+                                            key={c}
+                                            type="button"
+                                            disabled={!hasText}
+                                            onClick={() => applyPatch({ color: c })}
+                                            title={`colour ${c} for the selection`}
+                                            className="w-7 h-7 rounded border border-rule2 hover:border-[color:var(--color-accent)] disabled:opacity-40"
+                                            style={{ backgroundColor: c }}
+                                        />
+                                    ))}
+                                    <input
+                                        type="color"
+                                        disabled={!hasText}
+                                        value={hasSelection ? '#FFD600' : (richBase.color || '#FFD600')}
+                                        onChange={(e) => applyPatch({ color: e.target.value })}
+                                        title="custom colour"
+                                        className="input-field !w-14 !h-8 !p-0.5"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                                <label className="text-[11px] text-muted">Range font
+                                    <select
+                                        disabled={!hasText}
+                                        value={hasSelection ? '' : (richBase.font || '')}
+                                        onChange={(e) => applyPatch({ font: e.target.value || null })}
+                                        className="input-field !py-1.5 mt-1"
+                                    >
+                                        <option value="">{hasSelection ? 'keep / inherit' : 'default'}</option>
+                                        {HOOK_FONTS.map((f) => <option key={f} value={f}>{f}</option>)}
+                                    </select>
+                                </label>
+                                <label className="text-[11px] text-muted">Range size
+                                    <select
+                                        disabled={!hasText}
+                                        value={hasSelection ? '' : (richBase.size || '')}
+                                        onChange={(e) => applyPatch({ size: e.target.value || null })}
+                                        className="input-field !py-1.5 mt-1"
+                                    >
+                                        <option value="">{hasSelection ? 'keep / inherit' : 'default'}</option>
+                                        {HOOK_SIZE_OPTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                                    </select>
+                                </label>
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={resetSelectionStyling}
+                                disabled={!hasText}
+                                className="text-xs text-muted underline underline-offset-2 hover:text-ink disabled:opacity-40"
+                            >
+                                {hasSelection ? 'clear styling on selection' : 'clear default styling'}
+                            </button>
+                        </div>
+
+                        {/* Style (whole-hook look) */}
                         <div>
                             <p className="eyebrow mb-2">Style</p>
                             <div className="grid grid-cols-3 gap-1.5">
-                                {HOOK_STYLES.map((s) => (
-                                    <button
-                                        key={s.value}
-                                        onClick={() => setStyle(s.value)}
-                                        className={`px-1 py-2 rounded-input border text-xs transition-colors
-                                            ${style === s.value ? 'border-[color:var(--color-accent)]' : 'border-rule2 hover:border-[color:var(--color-accent)]'}`}
-                                        title={s.label}
-                                    >
-                                        <span
-                                            className="block rounded px-1 py-1 font-bold"
-                                            style={{
-                                                backgroundColor: s.box,
-                                                color: s.text,
-                                                textShadow: s.outline ? '-1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000' : 'none',
-                                            }}
-                                        >Aa</span>
-                                        <span className="block mt-1 text-muted">{s.label}</span>
-                                    </button>
-                                ))}
+                                {HOOK_STYLE_OPTIONS.map((s) => {
+                                    const look = HOOK_LOOKS[s.value] || HOOK_LOOKS.classic;
+                                    return (
+                                        <button
+                                            key={s.value}
+                                            onClick={() => setStyle(s.value)}
+                                            className={`px-1 py-2 rounded-input border text-xs transition-colors
+                                                ${style === s.value ? 'border-[color:var(--color-accent)]' : 'border-rule2 hover:border-[color:var(--color-accent)]'}`}
+                                            title={s.label}
+                                        >
+                                            <span
+                                                className="block rounded px-1 py-1 font-bold"
+                                                style={{
+                                                    backgroundColor: look.box ?? 'transparent',
+                                                    color: look.text,
+                                                    textShadow: look.outlinePx > 0 ? '-1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000' : 'none',
+                                                }}
+                                            >Aa</span>
+                                            <span className="block mt-1 text-muted">{s.label}</span>
+                                        </button>
+                                    );
+                                })}
                             </div>
                         </div>
 
@@ -177,7 +316,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                         <div>
                             <p className="eyebrow mb-2">Position</p>
                             <SegmentedControl
-                                options={POSITION_OPTIONS}
+                                options={HOOK_POSITION_OPTIONS}
                                 value={position}
                                 onChange={setPosition}
                                 size="sm"
@@ -194,18 +333,21 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                         <div>
                             <p className="eyebrow mb-2">Size</p>
                             <SegmentedControl
-                                options={SIZE_OPTIONS}
+                                options={HOOK_SIZE_OPTIONS}
                                 value={size}
                                 onChange={setSize}
                                 size="sm"
                             />
+                            <p className="readout mt-1.5">
+                                base {Math.round((SIZE_SCALE[size] ?? 1) * 100)}% · ranges multiply on top
+                            </p>
                         </div>
 
                         {/* Entrance Animation (new) */}
                         <div className={serverRender ? 'opacity-50' : ''}>
                             <p className="eyebrow mb-2">Entrance</p>
                             <SegmentedControl
-                                options={ENTRANCE_OPTIONS}
+                                options={HOOK_ENTRANCE_OPTIONS}
                                 value={entranceAnimation}
                                 onChange={setEntranceAnimation}
                                 columns={2}
@@ -237,6 +379,10 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                                 <span className="readout">2S</span>
                                 <span className="readout">15S</span>
                             </div>
+                            <p className="text-[11px] text-muted mt-1.5 leading-relaxed">
+                                The hook shows for the first {displayDuration}s of the clip,
+                                then clears — scrub to confirm.
+                            </p>
                         </div>
 
                         {burnedHook && (
@@ -257,8 +403,12 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                             </div>
                         )}
 
-                        <div className="p-3 border border-rule rounded-input text-xs text-muted">
-                            Tip: keep it short and punchy. Using "POV:" or specific questions works best for retention.
+                        <div className="p-3 border border-rule rounded-input text-xs text-muted space-y-1">
+                            <p>Tip: keep it short and punchy. Using "POV:" or specific questions works best for retention.</p>
+                            <p>
+                                This is the on-video hook only — the clip title and the social
+                                caption are separate and never drawn over the frame.
+                            </p>
                         </div>
                     </div>
 
@@ -275,6 +425,10 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                                 } catch { /* ignore */ }
                                 onGenerate({
                                     text, position, size, style,
+                                    entranceAnimation,
+                                    // Structured rich text is the saved shape; the
+                                    // plain text still travels for compatibility.
+                                    rich: { text, base: richBase, spans: richSpans },
                                     // Remotion data
                                     remotion: hookConfig,
                                 });

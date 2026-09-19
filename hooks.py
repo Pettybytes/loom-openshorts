@@ -205,7 +205,126 @@ HOOK_STYLES = {
 }
 
 
-def create_hook_image(text, target_width, output_image_path="hook_overlay.png", font_scale=1.0, style="classic"):
+# --- Range styling (selective rich text) ------------------------------------
+#
+# A hook may carry per-range styling. `spans` are half-open [start, end)
+# character ranges over the hook text, applied in array order so a LATER span
+# wins on overlap — the identical rule to the editor's hookRichText.js. This is
+# the server half of the preview/render parity contract: what the editor
+# preview showed is what the burned frame shows.
+
+_SIZE_SCALE = {"S": 0.8, "M": 1.0, "L": 1.3}
+_STYLE_PROPERTIES = ("color", "font", "size")
+
+# Font files probed per family. The shipped Noto Serif Bold is the documented
+# fallback, and callers can learn which family was ACTUALLY used rather than
+# silently pretending the requested one was honoured.
+_FONT_FAMILY_CANDIDATES = {
+    "Verdana": [
+        "/System/Library/Fonts/Supplemental/Verdana.ttf",
+        "/Library/Fonts/Verdana.ttf",
+        "/mnt/c/Windows/Fonts/verdana.ttf",
+        "C:\\Windows\\Fonts\\verdana.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/Verdana.ttf",
+    ],
+    "Arial": [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/mnt/c/Windows/Fonts/arial.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf",
+    ],
+    "Helvetica": [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/msttcorefonts/Helvetica.ttf",
+    ],
+    "Impact": [
+        "/System/Library/Fonts/Supplemental/Impact.ttf",
+        "/Library/Fonts/Impact.ttf",
+        "/mnt/c/Windows/Fonts/impact.ttf",
+        "C:\\Windows\\Fonts\\impact.ttf",
+    ],
+    "Georgia": [
+        "/System/Library/Fonts/Supplemental/Georgia.ttf",
+        "/Library/Fonts/Georgia.ttf",
+        "/mnt/c/Windows/Fonts/georgia.ttf",
+        "C:\\Windows\\Fonts\\georgia.ttf",
+    ],
+    "Courier New": [
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+        "/Library/Fonts/Courier New.ttf",
+        "/mnt/c/Windows/Fonts/cour.ttf",
+        "C:\\Windows\\Fonts\\cour.ttf",
+    ],
+}
+
+
+def hex_to_rgb(value):
+    """'#RRGGBB' or '#RGB' -> (r, g, b); None for anything unusable."""
+    if not value or not isinstance(value, str):
+        return None
+    v = value.strip().lstrip('#')
+    if len(v) == 3:
+        v = ''.join(ch * 2 for ch in v)
+    if len(v) != 6:
+        return None
+    try:
+        return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return None
+
+
+def normalize_span(span, text_length):
+    """Clamp one span to the text. None when it cannot style anything."""
+    if not isinstance(span, dict):
+        return None
+    try:
+        start = max(0, min(text_length, int(span.get("start"))))
+        end = max(0, min(text_length, int(span.get("end"))))
+    except (TypeError, ValueError):
+        return None
+    if end <= start:
+        return None
+    override = {k: span[k] for k in _STYLE_PROPERTIES if span.get(k)}
+    if not override:
+        return None
+    return {"start": start, "end": end, **override}
+
+
+def build_style_map(text, spans, base_style=None):
+    """Per-character accumulated style.
+
+    Later spans win, exactly as in the editor — overlaps merge
+    property-by-property instead of one span discarding another."""
+    styles = [dict(base_style or {}) for _ in range(len(text))]
+    normalized = [s for s in (normalize_span(sp, len(text)) for sp in (spans or [])) if s]
+    normalized.sort(key=lambda s: (s["start"], s["end"]))
+    for span in normalized:
+        override = {k: span[k] for k in _STYLE_PROPERTIES if span.get(k)}
+        for i in range(span["start"], span["end"]):
+            styles[i] = {**styles[i], **override}
+    return styles
+
+
+def resolve_font(family, font_size, base_font):
+    """Best-effort font for a user-chosen family.
+
+    Returns (font, resolved_family). Falls back to the shipped Noto Serif face
+    and SAYS SO, so the degradation is observable rather than silent.
+    """
+    if family and family != "Noto Serif":
+        for path in _FONT_FAMILY_CANDIDATES.get(family, []):
+            if os.path.exists(path):
+                try:
+                    return ImageFont.truetype(path, font_size), family
+                except Exception:
+                    continue
+        print(f"⚠️ Hook range font '{family}' is unavailable — using Noto Serif.")
+    return base_font, "Noto Serif"
+
+
+def create_hook_image(text, target_width, output_image_path="hook_overlay.png", font_scale=1.0, style="classic", spans=None, base_style=None):
     """
     Generates a hook overlay image using pixel-based wrapping.
     target_width: The max width the box should occupy (e.g. 85% of video)
@@ -214,6 +333,19 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
     download_font_if_needed()
 
     look = HOOK_STYLES.get(style, HOOK_STYLES["classic"])
+
+    # Range styling: with spans (or a base style) the hook is drawn per range so
+    # the burned frame matches the editor preview. Without them, the original
+    # single-font path below runs unchanged.
+    normalized_spans = [
+        s for s in (normalize_span(sp, len(text)) for sp in (spans or [])) if s
+    ]
+    if normalized_spans or base_style:
+        return _create_hook_image_styled(
+            text, target_width, output_image_path, font_scale, look,
+            normalized_spans, base_style,
+        )
+
     box_fill = look["box"]
     text_fill = look["text"]
     outline = look["outline"]
@@ -370,7 +502,208 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
     img.save(output_image_path)
     return output_image_path, canvas_w, canvas_h
 
-def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="classic"):
+def _line_pieces(words):
+    """Turn a wrapped list of (word, start, end) into drawable line pieces.
+
+    The separator between two words is drawn as a single space and carries the
+    range of the character immediately before the next word, so range styling
+    still resolves to a real character."""
+    pieces = []
+    for i, (word, start, end) in enumerate(words):
+        if i:
+            pieces.append((' ', start - 1, start))
+        pieces.append((word, start, end))
+    return pieces
+
+
+def _wrap_lines_with_offsets(text, draw, font, emoji_font, max_text_width):
+    """Wrap `text` the same way the plain path does, keeping each word's
+    character offsets so range styling lands on the right characters."""
+    lines = []
+    offset = 0
+    for paragraph in text.split('\n'):
+        words = [(m.group(0), offset + m.start(), offset + m.end())
+                 for m in re.finditer(r'\S+', paragraph)]
+        offset += len(paragraph) + 1  # +1 for the '\n' that split() removed
+
+        if not words:
+            lines.append([])
+            continue
+
+        current = []
+        for word, wstart, wend in words:
+            candidate = ' '.join([w[0] for w in current] + [word])
+            if _measure_width(draw, candidate, font, emoji_font) <= max_text_width:
+                current.append((word, wstart, wend))
+                continue
+
+            if current:
+                lines.append(_line_pieces(current))
+                current = []
+
+            if _measure_width(draw, word, font, emoji_font) <= max_text_width:
+                current = [(word, wstart, wend)]
+            else:
+                # A word wider than the box: hard-wrap character-wise, keeping
+                # the ORIGINAL offsets so a styled range still maps correctly.
+                pieces = _break_long_word(draw, word, font, emoji_font, max_text_width)
+                cursor = wstart
+                for piece in pieces[:-1]:
+                    lines.append([(piece, cursor, cursor + len(piece))])
+                    cursor += len(piece)
+                if pieces:
+                    current = [(pieces[-1], cursor, cursor + len(pieces[-1]))]
+
+        if current:
+            lines.append(_line_pieces(current))
+    return lines
+
+
+def _styled_piece_runs(pieces, style_map, text_length):
+    """Split a line's pieces into (text, style) sub-runs of constant style."""
+    runs = []
+    for piece_text, pstart, _pend in pieces:
+        i = 0
+        while i < len(piece_text):
+            idx = pstart + i
+            style = style_map[idx] if 0 <= idx < text_length else {}
+            key = tuple(style.get(k) for k in _STYLE_PROPERTIES)
+            j = i + 1
+            while j < len(piece_text):
+                idx2 = pstart + j
+                style2 = style_map[idx2] if 0 <= idx2 < text_length else {}
+                if tuple(style2.get(k) for k in _STYLE_PROPERTIES) != key:
+                    break
+                j += 1
+            runs.append((piece_text[i:j], style))
+            i = j
+    return runs
+
+
+def _create_hook_image_styled(text, target_width, output_image_path, font_scale, look, spans, base_style):
+    """Per-range renderer for a hook carrying rich text.
+
+    Geometry (5% base font, 30/25 padding, 20 line spacing, 20 radius) mirrors
+    the unstyled path exactly; only the glyph drawing differs, because each
+    range can use its own colour, font and size.
+    """
+    box_fill = look["box"]
+    text_fill = look["text"]
+    outline = look["outline"]
+    has_box = box_fill[3] > 0
+    draw_shadow = look["shadow"]
+
+    padding_x = 30
+    padding_y = 25
+    line_spacing = 20
+    cornerradius = 20
+    shadow_offset = (5, 5)
+
+    base_font_size = int(target_width * 0.05)
+    font_size = int(base_font_size * font_scale)
+
+    try:
+        base_font = ImageFont.truetype(FONT_PATH, font_size)
+    except Exception:
+        base_font = ImageFont.load_default()
+
+    emoji_font = None
+    if _EMOJI_RE.search(text):
+        emoji_font = _load_emoji_font(font_size)
+        if emoji_font is None:
+            text = _EMOJI_RE.sub("", text)
+            text = re.sub(r"[ \t]{2,}", " ", text).strip()
+
+    style_map = build_style_map(text, spans, base_style)
+    dummy = Image.new('RGBA', (1, 1))
+    draw = ImageDraw.Draw(dummy)
+    max_text_width = target_width - (2 * padding_x)
+
+    lines = _wrap_lines_with_offsets(text, draw, base_font, emoji_font, max_text_width)
+
+    font_cache = {}
+
+    def font_for(style, size):
+        family = style.get("font") or "Noto Serif"
+        key = (family, size)
+        if key not in font_cache:
+            if size == font_size:
+                face = base_font
+            else:
+                try:
+                    face = ImageFont.truetype(FONT_PATH, size)
+                except Exception:
+                    face = base_font
+            font_cache[key] = resolve_font(family, size, face)[0]
+        return font_cache[key]
+
+    line_runs = []
+    line_widths = []
+    line_heights = []
+    for pieces in lines:
+        resolved = []
+        width = 0
+        height = 0
+        for run_text, style in _styled_piece_runs(pieces, style_map, len(text)):
+            size = int(font_size * _SIZE_SCALE.get(style.get("size"), 1.0))
+            face = font_for(style, size)
+            run_w = _measure_width(draw, run_text, face, emoji_font)
+            bbox = draw.textbbox((0, 0), run_text, font=face)
+            width += run_w
+            height = max(height, bbox[3] - bbox[1])
+            resolved.append((run_text, style, face, run_w))
+        line_runs.append(resolved)
+        line_widths.append(width)
+        line_heights.append(int(height) if height else font_size)
+
+    max_line_width = max(line_widths) if line_widths else 0
+    box_width = max(int(max_line_width) + (2 * padding_x), int(target_width * 0.3))
+    if not line_heights:
+        total_text_height = font_size
+    else:
+        total_text_height = sum(line_heights) + (len(line_heights) - 1) * line_spacing
+    box_height = total_text_height + (2 * padding_y)
+
+    canvas_w = box_width + 40
+    canvas_h = box_height + 40
+    img = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    if draw_shadow and has_box:
+        shadow_box = [
+            (20 + shadow_offset[0], 20 + shadow_offset[1]),
+            (20 + box_width + shadow_offset[0], 20 + box_height + shadow_offset[1]),
+        ]
+        draw.rounded_rectangle(shadow_box, radius=cornerradius, fill=(0, 0, 0, 100))
+        img = img.filter(ImageFilter.GaussianBlur(5))
+
+    draw_final = ImageDraw.Draw(img)
+    if has_box:
+        draw_final.rounded_rectangle(
+            [(20, 20), (20 + box_width, 20 + box_height)],
+            radius=cornerradius, fill=box_fill,
+        )
+
+    current_y = 20 + padding_y - 2
+    for i, resolved in enumerate(line_runs):
+        if not resolved:
+            current_y += font_size + line_spacing
+            continue
+
+        x = 20 + int(box_width - line_widths[i]) // 2
+        for run_text, style, face, run_w in resolved:
+            fill = hex_to_rgb(style.get("color")) or text_fill
+            _draw_mixed(img, draw_final, (x, current_y), run_text, face, emoji_font,
+                        fill=fill, outline=outline)
+            x += run_w
+
+        current_y += line_heights[i] + line_spacing
+
+    img.save(output_image_path)
+    return output_image_path, canvas_w, canvas_h
+
+
+def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="classic", spans=None, base_style=None):
     """
     Overlays text hook onto video.
     position: 'top', 'center', 'bottom'
@@ -407,7 +740,7 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
                      f"{_truncate_bytes(stem, 80)}.png")
     
     try:
-        img_path, box_w, box_h = create_hook_image(text, target_box_width, hook_filename, font_scale=font_scale, style=style)
+        img_path, box_w, box_h = create_hook_image(text, target_box_width, hook_filename, font_scale=font_scale, style=style, spans=spans, base_style=base_style)
         
         # 3. Calculate Overlay Position
         overlay_x = (video_width - box_w) // 2
