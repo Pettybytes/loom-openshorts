@@ -654,13 +654,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       // Chain subsequent burns off the freshly recut file.
       let currentFile = rrData?.new_video_url ? outputBasename(rrData.new_video_url) : null;
 
-      // ---- 3. Hook (if changed) ----------------------------------------------
+      // ---- 3. Hook (always apply if present, since rerender strips it) -------
       let hookApplied = false;
-      if (hookChanged && currentFile) {
+      const hookText = (hook || '').trim();
+      if (hookText !== '' && currentFile) {
         setProgress({ stage: 'hook', detail: 'Applying hook…' });
-        const hookText = (hook || '').trim();
-        // Clamp any ranges to the CURRENT text (the user may have edited the
-        // text after styling it) before sending them to the renderer.
         const burnRichPayload = (() => {
           const burnRich = normalizeRich({ text: hookText, base: hookRich.base, spans: hookRich.spans });
           const payload = {};
@@ -670,16 +668,12 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         })();
         const hRes = await apiFetch('/api/hook', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(hookText
-            ? {
-                job_id, clip_index, text: hookText, position: hookPosition,
-                size: hookSize, style: hookStyle, duration_seconds: hookDuration,
-                input_filename: currentFile,
-                // Range styling travels with the burn so the encoded hook uses
-                // the same semantics the preview showed.
-                ...burnRichPayload,
-              }
-            : { job_id, clip_index, remove: true, input_filename: currentFile }),
+          body: JSON.stringify({
+            job_id, clip_index, text: hookText, position: hookPosition,
+            size: hookSize, style: hookStyle, duration_seconds: hookDuration,
+            input_filename: currentFile,
+            ...burnRichPayload,
+          }),
         });
         if (hRes.ok) {
           const hData = await hRes.json();
@@ -713,6 +707,35 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         }
       }
 
+      // ---- 5. Header (if enabled) --------------------------------------------
+      let headerApplied = false;
+      if (titleOverlayEnabled && titleOverlayText.trim() && currentFile) {
+        setProgress({ stage: 'header', detail: 'Applying header…' });
+        const headerRichPayload = (() => {
+          const burnRich = normalizeRich({ text: titleOverlayText.trim(), base: headerRich.base, spans: headerRich.spans });
+          const payload = {};
+          if (burnRich.spans.length) payload.spans = burnRich.spans;
+          if (!isEmptyBase(burnRich.base)) payload.base = burnRich.base;
+          return payload;
+        })();
+        const headRes = await apiFetch('/api/header', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_id, clip_index, text: titleOverlayText.trim(), position: titleOverlayPosition,
+            region: headerRegion, font_family: titleOverlayFontFamily, font_size: titleOverlayFontSize,
+            text_color: titleOverlayColor, background: titleOverlayBackground,
+            background_color: titleOverlayBackgroundColor, alignment: titleOverlayAlignment,
+            input_filename: currentFile,
+            ...headerRichPayload,
+          }),
+        });
+        if (headRes.ok) {
+          const headData = await headRes.json();
+          if (headData?.new_video_url) currentFile = outputBasename(headData.new_video_url);
+          headerApplied = true;
+        }
+      }
+
       const finalUrl = currentFile
         ? getApiUrl(`/videos/${job_id}/${currentFile}`)
         : (rrData?.new_video_url ? getApiUrl(rrData.new_video_url) : null);
@@ -728,16 +751,16 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           trim_start: Number(trimStart), trim_end: Number(trimEnd),
           caption_changes, crop_reframe_changes,
           instruction: instruction.trim() || undefined, llm_assist_used: false,
-          edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, framing, segments,
+          edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, header_applied: headerApplied, framing, segments,
             // The durable record of the hook's range styling, so the render
             // contract keeps the same semantics the preview showed.
             hook_rich: hookApplied ? serializeRich(normalizeRich({ text: hook.trim(), base: hookRich.base, spans: hookRich.spans })) : null,
             // The header's range styling, carried on the same durable record as
             // the rest of the overlay so a render/reopen keeps the semantics.
-            header_rich: titleOverlayEnabled && titleOverlayText.trim() && (headerRich.spans.length || headerRich.base.color || headerRich.base.font)
+            header_rich: headerApplied && (headerRich.spans.length || headerRich.base.color || headerRich.base.font)
               ? { text: titleOverlayText.trim(), base: { ...headerRich.base }, spans: headerRich.spans.map((s) => ({ ...s })) }
               : null,
-            title_overlay: titleOverlayEnabled && titleOverlayText.trim() ? {
+            title_overlay: headerApplied ? {
               region: headerRegion,
             text: titleOverlayText.trim(), position: titleOverlayPosition, font_family: titleOverlayFontFamily,
             font_size: titleOverlayFontSize, text_color: titleOverlayColor, background: titleOverlayBackground,

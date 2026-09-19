@@ -4383,6 +4383,97 @@ class HookBaseStyle(BaseModel):
     size: Optional[str] = None
 
 
+
+class HeaderRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    text: str
+    input_filename: Optional[str] = None
+    position: Optional[str] = "top"
+    region: Optional[str] = "overlay"
+    font_family: Optional[str] = "Verdana"
+    font_size: Optional[int] = 40
+    text_color: Optional[str] = "#FFFFFF"
+    background: Optional[str] = "none"
+    background_color: Optional[str] = "#000000"
+    alignment: Optional[str] = "center"
+    spans: Optional[List[HookSpan]] = None
+    base: Optional[HookBaseStyle] = None
+
+@app.post("/api/header")
+async def add_header(req: HeaderRequest, request: Request):
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+        
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+        
+    clips = data.get('shorts', [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+        
+    clip_data = clips[req.clip_index]
+    
+    if req.input_filename:
+        filename = os.path.basename(req.input_filename)
+    else:
+        filename = clip_data.get('video_url', '').split('/')[-1]
+        if not filename:
+             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+             filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
+         
+    input_path = os.path.join(output_dir, filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+    clean_name = filename
+    out_name = f"header_{int(time.time())}_{uuid.uuid4().hex[:6]}_{clean_name}"
+    output_path = os.path.join(output_dir, out_name)
+
+    reservation_id = await reserve_managed_action(request, 1, req.job_id, "header")
+    try:
+        header_spans = [s.model_dump(exclude_none=True) for s in (req.spans or [])] or None
+        header_base_style = req.base.model_dump(exclude_none=True) if req.base else None
+
+        def run_header():
+            from hooks import add_header_to_video
+            add_header_to_video(
+                input_path, req.text, output_path, position=req.position, region=req.region,
+                font_family=req.font_family, font_size_px=req.font_size, text_color=req.text_color,
+                background=req.background, background_color=req.background_color, alignment=req.alignment,
+                spans=header_spans, base_style=header_base_style
+            )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, run_header)
+
+    except Exception as e:
+        print(f"❌ Header Error: {e}")
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if reservation_id:
+        await _metering.commit_reservation(reservation_id)
+
+    clip_data['video_url'] = f"/videos/{req.job_id}/{out_name}"
+    jobs[req.job_id]['result']['clips'][req.clip_index]['video_url'] = clip_data['video_url']
+    
+    with open(json_files[0], 'w') as f:
+        json.dump(data, f, indent=2)
+
+    return {"status": "success", "new_video_url": clip_data['video_url']}
+
 class HookRequest(BaseModel):
     job_id: str
     clip_index: int

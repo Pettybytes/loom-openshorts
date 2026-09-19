@@ -742,7 +742,7 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
         cmd = ['ffprobe', '-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', video_path]
         res = subprocess.check_output(cmd, timeout=60).decode().strip()
         # Takes first stream if multiple
-        dims = res.split('\n')[0].split('x')
+        dims = res.split("\n")[0].split("x")
         video_width = int(dims[0])
         video_height = int(dims[1])
     except Exception as e:
@@ -811,3 +811,224 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
         # Cleanup temp image
         if os.path.exists(hook_filename):
             os.remove(hook_filename)
+
+
+def create_header_image(text, target_width, output_image_path="header_overlay.png", 
+                        font_family="Verdana", font_size_px=40, text_color="#FFFFFF", 
+                        background="none", background_color="#000000", alignment="center", 
+                        spans=None, base_style=None):
+    download_font_if_needed()
+    
+    # Range styling setup
+    normalized_spans = [
+        s for s in (normalize_span(sp, len(text)) for sp in (spans or [])) if s
+    ]
+    style_map = build_style_map(text, normalized_spans, base_style)
+    
+    # 0.4 multiplier for preview scale parity
+    base_font_size = int(font_size_px * 0.4)
+    
+    try:
+        base_font, _ = resolve_font(font_family, base_font_size, ImageFont.truetype(FONT_PATH, base_font_size))
+    except Exception:
+        base_font = ImageFont.load_default()
+
+    emoji_font = None
+    if _EMOJI_RE.search(text):
+        emoji_font = _load_emoji_font(base_font_size)
+        if emoji_font is None:
+            text = _EMOJI_RE.sub("", text)
+            text = re.sub(r"[ 	]{2,}", " ", text).strip()
+            
+    dummy = Image.new('RGBA', (1, 1))
+    draw = ImageDraw.Draw(dummy)
+    
+    padding_x = 10 if background != 'none' else 0
+    padding_y = 4 if background != 'none' else 0
+    line_spacing = 4
+    
+    max_text_width = target_width - (2 * padding_x)
+    lines = _wrap_lines_with_offsets(text, draw, base_font, emoji_font, max_text_width)
+    
+    def font_for(style, size):
+        family = style.get("font") or font_family
+        if size == base_font_size and family == font_family:
+            return base_font
+        try:
+            face, _ = resolve_font(family, size, ImageFont.truetype(FONT_PATH, size))
+            return face
+        except Exception:
+            return base_font
+
+    line_runs = []
+    line_widths = []
+    line_heights = []
+    
+    for pieces in lines:
+        resolved = []
+        width = 0
+        height = 0
+        for run_text, style in _styled_piece_runs(pieces, style_map, len(text)):
+            size = int(base_font_size * _size_multiplier(style.get("size")))
+            face = font_for(style, size)
+            run_w = _measure_width(draw, run_text, face, emoji_font)
+            bbox = draw.textbbox((0, 0), run_text, font=face)
+            width += run_w
+            height = max(height, bbox[3] - bbox[1])
+            resolved.append((run_text, style, face, run_w))
+        line_runs.append(resolved)
+        line_widths.append(width)
+        line_heights.append(int(height) if height else base_font_size)
+        
+    max_line_width = max(line_widths) if line_widths else 0
+    
+    # Calculate box dimensions
+    # For alignment, the total image width can just be max_line_width + 2*padding
+    box_width = int(max_line_width) + (2 * padding_x)
+    if not line_heights:
+        total_text_height = base_font_size
+    else:
+        total_text_height = sum(line_heights) + (len(line_heights) - 1) * line_spacing
+    box_height = total_text_height + (2 * padding_y)
+    
+    img = Image.new('RGBA', (box_width, box_height), (0, 0, 0, 0))
+    draw_final = ImageDraw.Draw(img)
+    
+    bg_rgba = hex_to_rgb(background_color)
+    if bg_rgba:
+        bg_rgba = bg_rgba + (255,)
+    else:
+        bg_rgba = (0, 0, 0, 255)
+        
+    if background == 'box':
+        draw_final.rounded_rectangle([(0, 0), (box_width, box_height)], radius=6, fill=bg_rgba)
+        
+    current_y = padding_y
+    for i, resolved in enumerate(line_runs):
+        if not resolved:
+            current_y += base_font_size + line_spacing
+            continue
+            
+        line_w = line_widths[i]
+        if alignment == 'left':
+            x = padding_x
+        elif alignment == 'right':
+            x = box_width - padding_x - line_w
+        else:
+            x = padding_x + (max_line_width - int(line_w)) // 2
+            
+        if background == 'highlight':
+            # draw per-line background
+            bg_rect = [(x - padding_x, current_y - padding_y), 
+                       (x + line_w + padding_x, current_y + line_heights[i] + padding_y)]
+            draw_final.rounded_rectangle(bg_rect, radius=6, fill=bg_rgba)
+            
+        for run_text, style, face, run_w in resolved:
+            fill = hex_to_rgb(style.get("color") or text_color) or (255,255,255)
+            _draw_mixed(img, draw_final, (x, current_y), run_text, face, emoji_font, fill=fill)
+            x += run_w
+            
+        current_y += line_heights[i] + line_spacing
+        
+    img.save(output_image_path)
+    return output_image_path, box_width, box_height
+
+def add_header_to_video(video_path, text, output_path, position="top", region="overlay", 
+                        font_family="Verdana", font_size_px=40, text_color="#FFFFFF", 
+                        background="none", background_color="#000000", alignment="center", 
+                        spans=None, base_style=None):
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video {video_path} not found")
+
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', video_path]
+        res = subprocess.check_output(cmd, timeout=60).decode().strip()
+        dims = res.split('\n')[0].split('x')
+        video_width = int(dims[0])
+        video_height = int(dims[1])
+    except Exception as e:
+        print(f"⚠️ FFprobe failed: {e}. Assuming 720x1280")
+        video_width = 720
+        video_height = 1280
+
+    if region == 'dedicated':
+        canvas_width = video_width
+        canvas_height = int(video_height * 100 / 82)
+        band_h = canvas_height - video_height
+    else:
+        canvas_width = video_width
+        canvas_height = video_height
+        band_h = int(canvas_height * 14 / 100)
+        
+    padding_pct = 8
+    target_box_width = int(canvas_width * (100 - 2 * padding_pct) / 100)
+    
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+    header_filename = f"temp_header_{uuid.uuid4().hex[:8]}_{_truncate_bytes(stem, 80)}.png"
+    
+    try:
+        img_path, box_w, box_h = create_header_image(
+            text, target_box_width, header_filename, 
+            font_family=font_family, font_size_px=font_size_px, text_color=text_color, 
+            background=background, background_color=background_color, alignment=alignment,
+            spans=spans, base_style=base_style
+        )
+        
+        # Match overlayLayout.js
+        # HEADER_REGION_BOTTOM_PCT = 14 (overlay), DEDICATED_CANVAS_PCT = 18 (dedicated)
+        region_top_pct = 0
+        region_bottom_pct = 18 if region == 'dedicated' else 14
+        region_height_pct = region_bottom_pct - region_top_pct
+        
+        inset_pct = min(2, region_height_pct / 3)
+        usable_top_pct = region_top_pct + inset_pct
+        usable_bottom_pct = region_bottom_pct - inset_pct
+        
+        if position == 'upper':
+            anchor_pct = 2
+        else: # top (default)
+            anchor_pct = 7
+            
+        anchor_pct = max(usable_top_pct, min(anchor_pct, usable_bottom_pct))
+        
+        overlay_y = int(canvas_height * anchor_pct / 100)
+            
+        if alignment == 'left':
+            overlay_x = int(canvas_width * padding_pct / 100)
+        elif alignment == 'right':
+            overlay_x = canvas_width - int(canvas_width * padding_pct / 100) - box_w
+        else:
+            overlay_x = (canvas_width - box_w) // 2
+            
+        print(f"🎬 Overlaying header: '{text}' at {overlay_x},{overlay_y} (region={region})")
+        
+        if region == 'dedicated':
+            # Pad video and overlay in one filtergraph
+            pad_y = band_h
+            filter_complex = f"[0:v]pad=w=iw:h={canvas_height}:x=0:y={pad_y}:color=black[padded]; [padded][1:v]overlay={overlay_x}:{overlay_y}"
+        else:
+            filter_complex = f"[0:v][1:v]overlay={overlay_x}:{overlay_y}"
+            
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', video_path,
+            '-i', img_path,
+            '-filter_complex', filter_complex,
+            '-c:a', 'copy',
+            *video_encode_args(QUALITY),
+            *METADATA_SCRUB,
+            '-movflags', '+faststart',
+            output_path
+        ]
+        
+        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+        print(f"✅ Header added to {output_path}")
+        return True
+
+    except Exception as e:
+        print(f"❌ Header Gen Error: {e}")
+        raise e
+    finally:
+        if os.path.exists(header_filename):
+            os.remove(header_filename)
+
