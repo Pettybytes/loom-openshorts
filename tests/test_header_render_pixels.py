@@ -1,13 +1,14 @@
 """Header burn — the SERVER half of the preview/render geometry contract.
 
-Both layout modes must render the SAME fixed 9:16 canvas (720x1280). The
-dedicated black Header band is reserved INSIDE that canvas; the video is fitted
-below it by HEIGHT, so it is narrower than the canvas and centred, with bars
-either side -- never stretched and never scaled to full width.
+Both layout modes render the SAME fixed 9:16 canvas (720x1280). In dedicated
+mode the black Header band is reserved INSIDE that canvas at the top, and the
+video COVERS the area below it: full canvas width, excess height centre-cropped.
+No side bars, no stretching — the visible video region spans the full width
+below the band, and that is what the Hook is positioned against.
 
 These assertions read real bytes back out of the rendered MP4 (ffprobe for the
 frame size, ffmpeg + PIL for the pixels) so a composition change that silently
-produced a taller canvas or a stretched video fails here.
+produced a taller canvas, side bars, or a stretched/short video fails here.
 
 Written as unittest so the repo's documented runner collects it:
 
@@ -31,10 +32,8 @@ SRC_W, SRC_H = 720, 1280
 GREY = (100, 100, 100)
 
 # Geometry the composition must obey, in canvas pixels.
-BAND_H = int(round(SRC_H * 18 / 100))
-FIT_H = SRC_H - BAND_H
-FIT_W = int(round(SRC_W * (FIT_H / float(SRC_H))))
-FIT_X = (SRC_W - FIT_W) // 2
+BAND_H = int(round(SRC_H * 18 / 100))   # reserved black Header band at the top
+VID_H = SRC_H - BAND_H                  # area the video covers below the band
 
 HEADER_TEXT = "HEADER"
 HOOK_TEXT = "HOOK"
@@ -78,15 +77,11 @@ def _is_greyish(px):
     return max(px) - min(px) < 45 and 55 < px[0] < 165
 
 
-def _is_colour(px, want, tol=90):
-    return all(abs(px[i] - want[i]) <= tol for i in range(3))
-
-
 def _pixels_like(img, want, tol=90):
     return [(x, y)
             for y in range(0, img.height, 2)
             for x in range(0, img.width, 2)
-            if _is_colour(img.getpixel((x, y)), want, tol)]
+            if all(abs(img.getpixel((x, y))[i] - want[i]) <= tol for i in range(3))]
 
 
 class HeaderRenderPixels(unittest.TestCase):
@@ -136,7 +131,6 @@ class HeaderRenderPixels(unittest.TestCase):
         self.assertTrue(greens, "the Header was not burned in overlay mode")
         self.assertTrue(all(y < BAND_H for _x, y in greens),
                         "overlay Header must stay inside the top band")
-        # No letterboxing: the video reaches the canvas edge.
         self.assertTrue(_is_greyish(img.getpixel((2, SRC_H // 2))),
                         "overlay mode must not letterbox the video")
 
@@ -144,8 +138,6 @@ class HeaderRenderPixels(unittest.TestCase):
 
     def test_dedicated_mode_reserves_a_black_band_at_the_top(self):
         img = _frame(self._render("dedicated"), "frame_dedicated")
-        # A row above the Header text (which sits lower in the band) is pure
-        # black: the reserved band, not the video.
         for x in range(0, SRC_W, 40):
             self.assertTrue(_is_black(img.getpixel((x, 4))),
                             "row y=4 must be the reserved black band at x=%d" % x)
@@ -157,37 +149,27 @@ class HeaderRenderPixels(unittest.TestCase):
         self.assertTrue(all(y < BAND_H for _x, y in greens),
                         "the Header must stay inside the reserved band")
 
-    def test_dedicated_mode_fits_the_video_below_the_band_centred(self):
+    def test_dedicated_mode_covers_full_width_below_the_band(self):
         img = _frame(self._render("dedicated"), "frame_dedicated")
-        mid = BAND_H + FIT_H // 2
-
-        # The video starts BELOW the band...
+        mid = BAND_H + VID_H // 2
+        # The band stays black right above the video...
         self.assertTrue(_is_black(img.getpixel((SRC_W // 2, BAND_H - 6))),
                         "the band must still be black just above the video")
-        # ...is present below it, centred...
+        # ...and below it the video COVERS the full width: both edges are video,
+        # NOT black side bars.
+        self.assertTrue(_is_greyish(img.getpixel((2, mid))),
+                        "left edge must be video (no side bar)")
+        self.assertTrue(_is_greyish(img.getpixel((SRC_W - 3, mid))),
+                        "right edge must be video (no side bar)")
         self.assertTrue(_is_greyish(img.getpixel((SRC_W // 2, mid))),
                         "the video must be drawn below the band")
-        # ...and is narrower than the canvas, so the side bars are black.
-        self.assertTrue(_is_black(img.getpixel((2, mid))),
-                        "a side bar must remain black (video is not full width)")
-        self.assertTrue(_is_black(img.getpixel((SRC_W - 3, mid))),
-                        "a side bar must remain black (video is not full width)")
 
-    def test_dedicated_mode_never_scales_the_video_to_full_width(self):
+    def test_dedicated_mode_has_no_black_side_bars(self):
         img = _frame(self._render("dedicated"), "frame_dedicated")
-        mid = BAND_H + FIT_H // 2
-
-        def grey_span(row):
-            xs = [x for x in range(SRC_W) if _is_greyish(img.getpixel((x, row)))]
-            return (min(xs), max(xs)) if xs else None
-
-        span = grey_span(mid)
-        self.assertIsNotNone(span, "no video pixels found below the band")
-        left, right = span
-        # Within a few pixels of the aspect-preserving fit for this geometry.
-        self.assertLessEqual(abs(left - FIT_X), 8, "video not centred/not fitted")
-        self.assertLessEqual(abs(right - (FIT_X + FIT_W)), 8,
-                             "video not centred/not fitted")
+        mid = BAND_H + VID_H // 2
+        for x in range(0, SRC_W, 24):
+            self.assertFalse(_is_black(img.getpixel((x, mid))),
+                             "unexpected black side bar at x=%d below the band" % x)
 
     def test_dedicated_mode_keeps_the_hook_in_the_video_region(self):
         img = _frame(self._render("dedicated"), "frame_dedicated")
@@ -202,9 +184,7 @@ class HeaderRenderPixels(unittest.TestCase):
         # The values the renderer composes with, asserted directly so a change
         # to the band share cannot silently drift the canvas rule.
         self.assertEqual(BAND_H, 230)
-        self.assertEqual(FIT_H, 1050)
-        self.assertEqual(FIT_W, 591)
-        self.assertEqual(FIT_X, 64)
+        self.assertEqual(VID_H, 1050)
 
 
 if __name__ == "__main__":

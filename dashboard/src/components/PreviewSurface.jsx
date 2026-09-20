@@ -65,14 +65,15 @@ export default function PreviewSurface({
                     src={videoUrl}
                     style={{
                         position: 'absolute',
-                        // In 'dedicated' the video is fitted below the black band:
-                        // narrower than the canvas and centred, never stretched and
-                        // never full width. In 'overlay' it is the whole canvas.
+                        // In 'dedicated' the video COVERS the area below the black
+                        // band: full canvas width, excess height centre-cropped, no
+                        // side bars and no stretching. In 'overlay' it is the whole
+                        // canvas. One definition, shared with canvasLayout().
                         left: `${canvas.videoLeftPct}%`,
                         width: `${canvas.videoWidthPct}%`,
                         top: `${canvas.videoTopPct}%`,
                         height: `${canvas.videoHeightPct}%`,
-                        objectFit: 'contain',
+                        objectFit: 'cover',
                     }}
                     controls
                     muted

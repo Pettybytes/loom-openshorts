@@ -960,13 +960,13 @@ def add_header_to_video(video_path, text, output_path, position="top", region="o
 
     if region == 'dedicated':
         band_h = int(round(canvas_height * 18 / 100))  # DEDICATED_CANVAS_PCT
-        # Fit the video into the area BELOW the band, preserving aspect ratio.
-        # That area is only ~82% of a 9:16 canvas, so a 9:16 video fits by
-        # HEIGHT: it ends up NARROWER than the canvas and is CENTRED, with bars
-        # either side. Never stretched, never scaled to full width.
+        # COVER the area below the band: scale to the FULL canvas width, then
+        # centre-crop the excess height away. The video fills the width with NO
+        # side bars, and nothing is stretched (a centred crop preserves the
+        # source aspect ratio). Mirrors canvasLayout()/PreviewSurface.jsx.
         fit_h = canvas_height - band_h
-        fit_w = int(round(canvas_width * (fit_h / float(canvas_height))))
-        fit_x = (canvas_width - fit_w) // 2
+        fit_w = canvas_width
+        fit_x = 0
     else:
         band_h = int(canvas_height * 14 / 100)  # HEADER_REGION_BOTTOM_PCT
         fit_h = canvas_height
@@ -1021,13 +1021,14 @@ def add_header_to_video(video_path, text, output_path, position="top", region="o
             # its centred offset (the pad colour is the reserved black band and
             # the side bars), then overlay the Header on top.
             filter_complex = (
-                f"[0:v]scale={fit_w}:{fit_h},setsar=1,"
+                f"[0:v]scale={fit_w}:-2,setsar=1,"
+                f"crop={fit_w}:{fit_h}:0:(ih-{fit_h})/2,"
                 f"pad={canvas_width}:{canvas_height}:{fit_x}:{band_h}:color=black"
                 f"[composed];"
                 f"[composed][1:v]overlay={overlay_x}:{overlay_y}"
             )
             print(f"🧱 Dedicated composition: canvas={canvas_width}x{canvas_height} "
-                  f"band={band_h} video={fit_w}x{fit_h}@({fit_x},{band_h})")
+                  f"band={band_h} cover={fit_w}x{fit_h}@({fit_x},{band_h})")
         else:
             filter_complex = f"[0:v][1:v]overlay={overlay_x}:{overlay_y}"
             

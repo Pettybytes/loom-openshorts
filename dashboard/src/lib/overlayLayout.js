@@ -78,12 +78,12 @@ export function canvasLayout(mode, videoAspect = FRAME_ASPECT) {
   // dedicated black band is reserved INSIDE that canvas; it is never added
   // above it, so the canvas is never taller than the render.
   const canvasAspect = FRAME_ASPECT;
-  // The video is fitted into the area below the band preserving its aspect
-  // ratio. That area is only `videoHeightPct` of a 9:16 canvas, so a 9:16 video
-  // fits by HEIGHT: it comes out NARROWER than the canvas and is CENTRED, with
-  // bars either side. It is never stretched and never scaled to full width.
-  const videoWidthPct = Math.min(100, (videoAspect / canvasAspect) * videoHeightPct);
-  const videoLeftPct = (100 - videoWidthPct) / 2;
+  // The video COVERS the area below the band: it always spans the FULL canvas
+  // width, and any excess height is centre-cropped away. No side bars, no
+  // stretching. (The visible region therefore spans the full width below the
+  // band, which is what the Hook is positioned against.)
+  const videoWidthPct = 100;
+  const videoLeftPct = 0;
   return {
     mode: resolved,
     videoTopPct,

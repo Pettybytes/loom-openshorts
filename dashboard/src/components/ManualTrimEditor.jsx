@@ -576,6 +576,15 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         || hookPosition !== 'top' || hookSize !== 'M' || hookStyle !== 'classic' || hookDuration !== 5
         || hookEntrance !== 'spring';
 
+      // A required overlay step that fails must abort the completion: the
+      // registered asset must always be the LAST output of the chain, never an
+      // intermediate that silently skipped an overlay.
+      const failStep = (res, label) => {
+        setError(`${label} step failed (HTTP ${res.status}). Nothing was registered — fix and retry.`);
+        setProgress(null);
+        setRerendering(false);
+      };
+
       const caption_changes = {
         text: captionText,
         position: captionPosition,
@@ -675,11 +684,16 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             ...burnRichPayload,
           }),
         });
-        if (hRes.ok) {
-          const hData = await hRes.json();
-          if (hData?.new_video_url) currentFile = outputBasename(hData.new_video_url);
-          hookApplied = true;
+        if (!hRes.ok) {
+          // A failed burn must NEVER be swallowed: completing here would
+          // register the PRE-overlay render as a success and the review card
+          // would show a clip with no hook at all.
+          failStep(hRes, 'Hook');
+          return;
         }
+        const hData = await hRes.json();
+        if (hData?.new_video_url) currentFile = outputBasename(hData.new_video_url);
+        hookApplied = true;
       }
 
       // ---- 4. Styled captions (if changed) -----------------------------------
@@ -729,11 +743,17 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             ...headerRichPayload,
           }),
         });
-        if (headRes.ok) {
-          const headData = await headRes.json();
-          if (headData?.new_video_url) currentFile = outputBasename(headData.new_video_url);
-          headerApplied = true;
+        if (!headRes.ok) {
+          // The exact defect that put a header-less clip on the review card:
+          // the Header burn failed, the failure was swallowed, and the
+          // pre-Header render was registered as a successful version. Refuse to
+          // complete instead — nothing is registered, and the error is shown.
+          failStep(headRes, 'Header');
+          return;
         }
+        const headData = await headRes.json();
+        if (headData?.new_video_url) currentFile = outputBasename(headData.new_video_url);
+        headerApplied = true;
       }
 
       const finalUrl = currentFile

@@ -412,10 +412,11 @@ test('dedicated mode reserves a real black band and puts the video below it', ()
   // band is reserved INSIDE it, never added above it.
   assert.equal(dedicated.canvasAspect, FRAME_ASPECT,
     'dedicated: the canvas is the SAME fixed 9:16 frame, not a taller one');
-  // Fitting a 9:16 video into the area below the band is a fit by HEIGHT: the
-  // video comes out narrower than the canvas and is centred, never stretched.
-  assert.equal(dedicated.videoWidthPct, 100 - DEDICATED_CANVAS_PCT);
-  assert.equal(dedicated.videoLeftPct, DEDICATED_CANVAS_PCT / 2);
+  // The video COVERS the area below the band: it spans the FULL canvas width
+  // and the excess height is centre-cropped. No side bars, no stretching — in
+  // either mode. (This reverses an earlier fit-by-height rule.)
+  assert.equal(dedicated.videoWidthPct, 100, 'dedicated video fills the width');
+  assert.equal(dedicated.videoLeftPct, 0, 'dedicated video is not inset');
   assert.equal(overlay.videoWidthPct, 100);
   assert.equal(overlay.videoLeftPct, 0);
 });
