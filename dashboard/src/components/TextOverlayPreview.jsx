@@ -43,7 +43,7 @@ export default function TextOverlayPreview({ header, hook, currentTime = 0, clas
       data-testid="text-overlay-preview"
     >
       {layout.header && <HeaderLayer header={header} box={layout.header} />}
-      {layout.hook && <HookOverlayLayer hook={hook} box={layout.hook} />}
+      {layout.hook && <HookOverlayLayer hook={hook} box={layout.hook} canvas={layout.canvas} />}
     </div>
   );
 }
@@ -133,7 +133,7 @@ function HeaderLayer({ header, box }) {
  * C. Hook. Its own overlay, its own region, its own visibility semantics, with
  * per-range rich text on top of the hook's own base size.
  */
-function HookOverlayLayer({ hook, box }) {
+function HookOverlayLayer({ hook, box, canvas }) {
   const look = hookLook(hook.style);
   const scale = SIZE_SCALE[hook.size] ?? 1;
   const entrance = ENTRANCE_KEYFRAMES[hook.entranceAnimation] ?? null;
@@ -141,11 +141,20 @@ function HookOverlayLayer({ hook, box }) {
   const baseCqw = 5 * scale;
 
   return (
+    // Pinned to the VIDEO region, not the canvas: in 'dedicated' mode the
+    // video is narrower than the fixed 9:16 canvas and centred, and the Hook
+    // must stay positioned relative to the video (unchanged). This element is
+    // also the container-query context for the Hook's own width, so its `cqw`
+    // font sizing resolves against the VIDEO width (5% of it, matching
+    // hooks.py) rather than the wider canvas.
     <div
       data-testid="hook-overlay"
-      className="absolute left-0 right-0 flex justify-center"
+      className="absolute flex justify-center"
       style={{
+        left: `${canvas.videoLeftPct}%`,
+        width: `${canvas.videoWidthPct}%`,
         top: `${box.topPct}%`,
+        containerType: 'inline-size',
         paddingLeft: `${box.paddingPct}%`,
         paddingRight: `${box.paddingPct}%`,
         transform: 'translateY(-50%)',

@@ -408,7 +408,16 @@ test('dedicated mode reserves a real black band and puts the video below it', ()
   assert.equal(overlay.canvasAspect, FRAME_ASPECT);
   assert.equal(dedicated.videoTopPct, DEDICATED_CANVAS_PCT);
   assert.equal(dedicated.videoHeightPct, 100 - DEDICATED_CANVAS_PCT);
-  assert.ok(dedicated.canvasAspect < FRAME_ASPECT, 'the canvas is taller than 9:16');
+  // The canvas is the render's fixed 9:16 frame in BOTH modes. The dedicated
+  // band is reserved INSIDE it, never added above it.
+  assert.equal(dedicated.canvasAspect, FRAME_ASPECT,
+    'dedicated: the canvas is the SAME fixed 9:16 frame, not a taller one');
+  // Fitting a 9:16 video into the area below the band is a fit by HEIGHT: the
+  // video comes out narrower than the canvas and is centred, never stretched.
+  assert.equal(dedicated.videoWidthPct, 100 - DEDICATED_CANVAS_PCT);
+  assert.equal(dedicated.videoLeftPct, DEDICATED_CANVAS_PCT / 2);
+  assert.equal(overlay.videoWidthPct, 100);
+  assert.equal(overlay.videoLeftPct, 0);
 });
 
 test('the Header region is the band in overlay mode and the black band in dedicated mode', () => {

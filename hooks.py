@@ -951,14 +951,27 @@ def add_header_to_video(video_path, text, output_path, position="top", region="o
         video_width = 720
         video_height = 1280
 
+    # The canvas is the render's OWN fixed frame in BOTH modes (9:16, e.g.
+    # 720x1280). The dedicated black band is reserved INSIDE that canvas -- it
+    # is never added above it, which would make the canvas taller than the
+    # render and diverge from the preview contract (canvasLayout()).
+    canvas_width = video_width
+    canvas_height = video_height
+
     if region == 'dedicated':
-        canvas_width = video_width
-        canvas_height = int(video_height * 100 / 82)
-        band_h = canvas_height - video_height
+        band_h = int(round(canvas_height * 18 / 100))  # DEDICATED_CANVAS_PCT
+        # Fit the video into the area BELOW the band, preserving aspect ratio.
+        # That area is only ~82% of a 9:16 canvas, so a 9:16 video fits by
+        # HEIGHT: it ends up NARROWER than the canvas and is CENTRED, with bars
+        # either side. Never stretched, never scaled to full width.
+        fit_h = canvas_height - band_h
+        fit_w = int(round(canvas_width * (fit_h / float(canvas_height))))
+        fit_x = (canvas_width - fit_w) // 2
     else:
-        canvas_width = video_width
-        canvas_height = video_height
-        band_h = int(canvas_height * 14 / 100)
+        band_h = int(canvas_height * 14 / 100)  # HEADER_REGION_BOTTOM_PCT
+        fit_h = canvas_height
+        fit_w = canvas_width
+        fit_x = 0
         
     padding_pct = 8
     target_box_width = int(canvas_width * (100 - 2 * padding_pct) / 100)
@@ -1003,9 +1016,18 @@ def add_header_to_video(video_path, text, output_path, position="top", region="o
         print(f"🎬 Overlaying header: '{text}' at {overlay_x},{overlay_y} (region={region})")
         
         if region == 'dedicated':
-            # Pad video and overlay in one filtergraph
-            pad_y = band_h
-            filter_complex = f"[0:v]pad=w=iw:h={canvas_height}:x=0:y={pad_y}:color=black[padded]; [padded][1:v]overlay={overlay_x}:{overlay_y}"
+            # Fixed-canvas composition: scale the video to fit the area below
+            # the band (aspect preserved), PAD it into the exact 9:16 canvas at
+            # its centred offset (the pad colour is the reserved black band and
+            # the side bars), then overlay the Header on top.
+            filter_complex = (
+                f"[0:v]scale={fit_w}:{fit_h},setsar=1,"
+                f"pad={canvas_width}:{canvas_height}:{fit_x}:{band_h}:color=black"
+                f"[composed];"
+                f"[composed][1:v]overlay={overlay_x}:{overlay_y}"
+            )
+            print(f"🧱 Dedicated composition: canvas={canvas_width}x{canvas_height} "
+                  f"band={band_h} video={fit_w}x{fit_h}@({fit_x},{band_h})")
         else:
             filter_complex = f"[0:v][1:v]overlay={overlay_x}:{overlay_y}"
             

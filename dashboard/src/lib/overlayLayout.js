@@ -32,8 +32,9 @@ export const HEADER_REGION = Object.freeze({ top: 0, bottom: HEADER_REGION_BOTTO
  *
  *   'overlay'   — the Header draws over the video inside a top band. Accepted
  *                 geometry; the DEFAULT.
- *   'dedicated' — the composition reserves a real black canvas band at the top
- *                 of the frame and the video is drawn below it.
+ *   'dedicated' — the composition reserves a real black band INSIDE the fixed
+ *                 9:16 canvas and the video is fitted below it, by height and
+ *                 centred. The canvas stays 9:16 in both modes.
  *
  * NOTE for future work: 'dedicated' was never a persisted concept. The old
  * black band was an artifact of the main preview box having no aspect ratio (a
@@ -44,7 +45,7 @@ export const HEADER_REGION = Object.freeze({ top: 0, bottom: HEADER_REGION_BOTTO
 export const HEADER_REGION_MODES = Object.freeze(['overlay', 'dedicated']);
 export const DEFAULT_HEADER_REGION = 'overlay';
 
-/** Share of the CANVAS height given to the dedicated black band. */
+/** Share of the fixed 9:16 CANVAS height given to the dedicated black band. */
 export const DEDICATED_CANVAS_PCT = 18;
 
 /** Coerce anything into a known mode; unknown/absent -> the accepted default. */
@@ -60,21 +61,37 @@ export function headerRegionFor(mode) {
 }
 
 /**
- * The canvas for a mode: in 'dedicated' the canvas is taller than the video, so
- * the black band is real compositional space rather than an overlay. In
- * 'overlay' the canvas IS the video (canvasAspect === videoAspect), which keeps
- * the accepted geometry identical.
+ * The canvas for a mode. The canvas is ALWAYS the render's fixed 9:16 frame
+ * (canvasAspect === FRAME_ASPECT) in BOTH modes:
+ *
+ *   'overlay'   — the canvas IS the video; the Header draws over it in a band.
+ *   'dedicated' — the black band is reserved INSIDE the canvas at the top and
+ *                 the video is fitted into the area BELOW it, by height and
+ *                 centred (so it is narrower than the canvas). The band is real
+ *                 compositional space rather than an overlay.
  */
 export function canvasLayout(mode, videoAspect = FRAME_ASPECT) {
   const resolved = normalizeHeaderRegion(mode);
   const videoTopPct = resolved === 'dedicated' ? DEDICATED_CANVAS_PCT : 0;
   const videoHeightPct = 100 - videoTopPct;
+  // The canvas is ALWAYS the render's fixed 9:16 frame, in BOTH modes. The
+  // dedicated black band is reserved INSIDE that canvas; it is never added
+  // above it, so the canvas is never taller than the render.
+  const canvasAspect = FRAME_ASPECT;
+  // The video is fitted into the area below the band preserving its aspect
+  // ratio. That area is only `videoHeightPct` of a 9:16 canvas, so a 9:16 video
+  // fits by HEIGHT: it comes out NARROWER than the canvas and is CENTRED, with
+  // bars either side. It is never stretched and never scaled to full width.
+  const videoWidthPct = Math.min(100, (videoAspect / canvasAspect) * videoHeightPct);
+  const videoLeftPct = (100 - videoWidthPct) / 2;
   return {
     mode: resolved,
     videoTopPct,
     videoHeightPct,
+    videoWidthPct,
+    videoLeftPct,
     videoAspect,
-    canvasAspect: videoAspect * (videoHeightPct / 100),
+    canvasAspect,
   };
 }
 

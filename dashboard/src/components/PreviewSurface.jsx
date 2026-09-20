@@ -16,12 +16,14 @@ export const DEFAULT_FRAME_ASPECT = FRAME_ASPECT;
  *
  *   'overlay'  — canvas IS the video; the Header draws over it inside a top
  *                band. The accepted geometry, and the default.
- *   'dedicated'— the canvas is TALLER than the video: a real black band is
- *                reserved at the top for the Header and the video is drawn in
- *                the space below it. The band is compositional space, not an
- *                overlay, so the Header has a genuine black region of its own.
+ *   'dedicated'— the canvas stays 9:16; a real black band is reserved INSIDE
+ *                it at the top for the Header, and the video is fitted into
+ *                the space below the band — by HEIGHT, centred, so it ends up
+ *                narrower than the canvas with bars either side. The band is
+ *                compositional space, not an overlay, so the Header has a
+ *                genuine black region of its own.
  *
- * In both modes the canvas is pinned to an exact aspect ratio and the frame is
+ * In both modes the canvas is the render's exact 9:16 aspect and the frame is
  * capped by WIDTH only. A container without an aspect ratio (or a max-height
  * cap) letterboxes the video and was exactly what made the two surfaces
  * disagree before — so neither is reintroduced here.
@@ -63,12 +65,11 @@ export default function PreviewSurface({
                     src={videoUrl}
                     style={{
                         position: 'absolute',
-                        left: 0,
-                        right: 0,
-                        width: '100%',
-                        // In 'dedicated' the video starts below the black band and
-                        // fills the remaining space exactly; in 'overlay' it is the
-                        // whole canvas.
+                        // In 'dedicated' the video is fitted below the black band:
+                        // narrower than the canvas and centred, never stretched and
+                        // never full width. In 'overlay' it is the whole canvas.
+                        left: `${canvas.videoLeftPct}%`,
+                        width: `${canvas.videoWidthPct}%`,
                         top: `${canvas.videoTopPct}%`,
                         height: `${canvas.videoHeightPct}%`,
                         objectFit: 'contain',
