@@ -65,9 +65,9 @@ const swatchClass = (selected) =>
         ? 'ring-2 ring-[color:var(--color-accent)] ring-offset-2 ring-offset-[color:var(--color-paper-2)]'
         : 'ring-1 ring-[color:var(--color-rule-2)] hover:ring-[color:var(--color-accent)]'}`;
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, initialFontSize = 24, bulkCount = 0, bulkProgress }) {
     const [position, setPosition] = useState('bottom');
-    const [fontSize] = useState(24);
+    const [fontSize, setFontSize] = useState(initialFontSize ?? 24);
     const [fontName, setFontName] = useState('Verdana');
     const [fontColor, setFontColor] = useState('#FFFFFF');
     const [highlightColor, setHighlightColor] = useState('#FFDD00');
@@ -343,6 +343,29 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                     <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>{f.label}</option>
                                 ))}
                             </select>
+
+                            {/* Font size — the missing control. Feeds the same
+                                fontSize the preview and the render payload use,
+                                so the choice persists with the styling state. */}
+                            <label className="block mt-2 text-[11px] text-muted">
+                                <span className="eyebrow block mb-1">font size</span>
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        type="range" min="12" max="72" step="1"
+                                        value={fontSize}
+                                        onChange={(e) => setFontSize(Number(e.target.value))}
+                                        className="flex-1"
+                                        aria-label="Subtitle font size"
+                                    />
+                                    <input
+                                        type="number" min="12" max="72" step="1"
+                                        value={fontSize}
+                                        onChange={(e) => setFontSize(Number(e.target.value))}
+                                        className="input-field !py-1.5 w-16"
+                                        aria-label="Subtitle font size in pixels"
+                                    />
+                                </div>
+                            </label>
                         </div>
 
                         {/* Text Color */}

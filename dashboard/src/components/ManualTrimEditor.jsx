@@ -11,6 +11,7 @@ import PreviewSurface from './PreviewSurface';
 import { buildPreviewState } from '../lib/editorPreviewState';
 import { normalizeRich, serializeRich, isEmptyBase } from '../lib/richText';
 import { keepSelection, readSelection } from '../lib/rangeSelection';
+import { resolveClipIdentity, clipApiPath, jobApiPath } from '../lib/clipIdentity';
 
 // Relative public paths: the editor is served from the same public origin as
 // the LOOM adapter (Caddy funnel), so the exchange/complete calls and the
@@ -253,8 +254,15 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     let cancelled = false;
     (async () => {
       try {
-        const { job_id, clip_index } = session;
-        if (!job_id) throw new Error('Editor session is missing its clip identity — reopen the clip from the review card.');
+        // Resolve the clip identity FIRST. A session whose job_id/clip_index
+        // never resolved must not produce a single clip API request — that is
+        // what used to render `/api/status/undefined` into the live gateway.
+        const identity = resolveClipIdentity(session);
+        if (!identity.ok) {
+          throw new Error('Editor session is missing its clip identity — reopen the clip from the review card.');
+        }
+        const job_id = identity.jobId;
+        const clip_index = identity.clipIndex;
 
         // --- Durable bootstrap: the REQUIRED source of truth -----------------
         // Resolves the exact review asset from LOOM media/version records.
@@ -263,7 +271,23 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         const bsRes = await apiFetch(EDITOR_BOOTSTRAP_URL);
         if (!bsRes.ok) {
           let msg = `Bootstrap failed (HTTP ${bsRes.status})`;
-          try { const b = await bsRes.json(); if (b?.detail) msg = b.detail; else if (b?.error) msg = b.error; } catch (_) { /* ignore */ }
+          let reason = '';
+          try {
+            const b = await bsRes.json();
+            reason = b?.reason || '';
+            if (b?.detail) msg = b.detail; else if (b?.error) msg = b.error;
+          } catch (_) { /* ignore */ }
+          // A terminal session is not a transient failure: drop the retained
+          // credential so the next open re-acquires instead of looping on a
+          // dead token (which surfaced as an unexplained 401 wall).
+          if (bsRes.status === 401 && ['expired', 'completed', 'revoked', 'inactive', 'hash_mismatch'].includes(reason)) {
+            clearStoredEditorSession();
+            _resolvedSession = null;
+            const why = reason === 'completed' ? 'already been completed'
+              : reason === 'expired' ? 'expired'
+              : 'no longer valid';
+            throw new Error(`This editor session has ${why} — open the clip again from the review card to start a new one.`);
+          }
           throw new Error(msg);
         }
         const db = await bsRes.json();
@@ -530,7 +554,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }).catch(() => {});
     }, 700);
     return () => clearTimeout(t);
-  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction]);
+  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction, headerRegion]);
 
   // Snapshot the inline field's selection EAGERLY, during the event.
   //
@@ -763,8 +787,16 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
 
       // Register the new asset version + send the re-review card.
       setProgress({ stage: 'register', detail: 'Registering new version…' });
+      // The adapter authenticates this request from the Bearer credential
+      // BEFORE it reads or validates the body, so the editor session token must
+      // be attached here — the same credential the bootstrap/draft calls use.
+      const completeToken = getEditorSessionToken();
       const completeRes = await fetch(EDITOR_COMPLETE_URL, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(completeToken ? { Authorization: `Bearer ${completeToken}` } : {}),
+        },
         body: JSON.stringify({
           edit_session_id: session.edit_session_id,
           content_type: 'video/mp4',
@@ -1188,6 +1220,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           jobId={session?.job_id}
           clipIndex={Number(session?.clip_index ?? 0)}
           existingHook={null}
+          initialFontSize={captionFontSize}
         />
 
         <HookModal
@@ -1234,6 +1267,9 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             if (data.fontFamily) setTitleOverlayFontFamily(data.fontFamily);
             if (Number.isFinite(data.fontSize)) setTitleOverlayFontSize(data.fontSize);
             if (data.color) setTitleOverlayColor(data.color);
+            // The modal now returns the region; apply it so a `dedicated`
+            // selection survives the modal round-trip instead of reverting.
+            if (data.region) setHeaderRegion(data.region === 'dedicated' ? 'dedicated' : 'overlay');
             setShowHeaderModal(false);
           }}
           videoUrl={clipUrl}

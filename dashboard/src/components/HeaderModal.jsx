@@ -216,6 +216,10 @@ export default function HeaderModal({
                                 fontFamily,
                                 fontSize,
                                 color,
+                                // Round-trip the Header region. Omitting it here
+                                // silently dropped a `dedicated` selection made
+                                // in the inline field back to the default.
+                                region: initialRegion === 'dedicated' ? 'dedicated' : 'overlay',
                                 enabled: text.trim().length > 0,
                             })}
                             disabled={!text.trim()}
