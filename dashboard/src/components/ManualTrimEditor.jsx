@@ -3,6 +3,16 @@ import { Download, Wand2, Type, Scissors, Crosshair, ArrowLeft, Loader2, CheckCi
 import { getApiUrl } from '../config';
 import { apiFetch, setEditorSessionToken, clearEditorSessionToken, editorTokenFingerprint, getEditorSessionToken } from '../lib/api';
 import { realignCaptions } from '../lib/captionRealign';
+// The ONE range model (shared with the OpenShorts segment editor) + the visual
+// track that reuses ClipEditor's drag/scrub/snap mechanics.
+import {
+  MIN_RANGE_SEC,
+  resolveSourceDuration,
+  normalizeRange,
+  buildTimelineDocument,
+  parseTimelineDocument,
+} from '../lib/timelineState';
+import RangeTimeline from './RangeTimeline';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import HeaderModal from './HeaderModal';
@@ -100,6 +110,13 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [scenes, setScenes] = useState([]);
   const [canonical, setCanonical] = useState({ start: 0, end: 0 });
   const [clipDurationSec, setClipDurationSec] = useState(0); // clip-relative timeline length
+  // The DURABLE SOURCE the trim window lives on: how long the media actually is
+  // (measured) and what the durable bootstrap declared. Kept separate from
+  // clipDurationSec — that one is the CLIP-relative caption timeline.
+  const [measuredDurationSec, setMeasuredDurationSec] = useState(0);
+  const [declaredSourceDurationSec, setDeclaredSourceDurationSec] = useState(0);
+  // Browser-native selection preview (no render, no registration, no card).
+  const [previewing, setPreviewing] = useState(false);
 
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
@@ -164,6 +181,39 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [showHookModal, setShowHookModal] = useState(false);
 
   const videoRef = useRef(null);
+  // Selection-preview plumbing. The listener is removed explicitly (and on
+  // unmount) so repeat previews cannot stack timeupdate handlers.
+  const previewListenerRef = useRef(null);
+  const previewingRef = useRef(false);
+  // Typed edit events restored from the durable timeline document. Empty in
+  // Phase 2A (no event type is authorized yet) but carried through a reload so
+  // a future event survives instead of being dropped by the editor.
+  const timelineEventsRef = useRef([]);
+
+  // --- 1a. ONE range state model ---------------------------------------------
+  // `trimStart`/`trimEnd` are the single source of truth. The visual timeline,
+  // the ±1s controls and the numeric fields all write through setRange(), so
+  // they cannot hold divergent trim values.
+  const sourceDurationSec = useMemo(() => resolveSourceDuration({
+    measured: measuredDurationSec,
+    declared: declaredSourceDurationSec,
+    range: { start: Number(trimStart) || 0, end: Number(trimEnd) || 0 },
+  }), [measuredDurationSec, declaredSourceDurationSec, trimStart, trimEnd]);
+
+  // Which half of the bound was used — reported, never guessed.
+  const sourceBoundSource = useMemo(() => {
+    if (Number.isFinite(measuredDurationSec) && measuredDurationSec > 0) return 'measured';
+    if (Number.isFinite(declaredSourceDurationSec) && declaredSourceDurationSec > 0) return 'declared';
+    return null;
+  }, [measuredDurationSec, declaredSourceDurationSec]);
+
+  const setRange = useCallback(({ start, end }) => {
+    const next = normalizeRange({
+      start, end, sourceDuration: sourceDurationSec, minDuration: MIN_RANGE_SEC,
+    });
+    setTrimStart(next.start);
+    setTrimEnd(next.end);
+  }, [sourceDurationSec]);
 
   // --- 1. Session acquisition -----------------------------------------------
   useEffect(() => {
@@ -307,6 +357,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         setCanonical({ start, end });
         setTrimStart(start); setTrimEnd(end);
         if (Number.isFinite(dur) && dur > 0) setClipDurationSec(dur);
+        // The durable DECLARED duration. On a source-lineage launch this is the
+        // candidate's window length (floored at the window end), NOT the whole
+        // file — so it is only ever a fallback behind the media element's own
+        // measurement. See lib/timelineState.js resolveSourceDuration().
+        setDeclaredSourceDurationSec(Number.isFinite(dur) && dur > 0 ? dur : 0);
         if (db.framing === 'full' || db.framing === 'track') setFraming(db.framing);
         if (db.title != null) setTitle(db.title);
         if (db.hook != null) setHook(db.hook);
@@ -426,6 +481,16 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         // subtitle controls + trim + framing + caption text all persist.
         const d = session.draft;
         if (d) {
+          // Tolerant read-back: a draft saved before the timeline existed has no
+          // `timeline`, and the flat trim fields are then the honest answer.
+          const restored = parseTimelineDocument(d.timeline, {
+            range: { start: d.trim_start, end: d.trim_end },
+            sourceDuration: d.source_duration_seconds,
+          });
+          // Events are carried through untouched so a future typed edit event
+          // survives a reload instead of being silently dropped. Phase 2A
+          // creates none, and parseTimelineDocument refuses unimplemented types.
+          timelineEventsRef.current = restored.events || [];
           if (d.trim_start != null && d.trim_end != null) {
             setTrimStart(Number(d.trim_start));
             setTrimEnd(Number(d.trim_end));
@@ -540,6 +605,17 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         alignment: titleOverlayAlignment,
       },
       instruction,
+      // The timeline document is the durable, ADDITIVE home for typed edit
+      // events (lib/timelineState.js). Phase 2A writes exactly the range; the
+      // shape is already the seam for split/remove/reorder/sfx/transition/
+      // overlay/commentary/captions/hook, so adding one later does not replace
+      // this representation.
+      source_duration_seconds: sourceDurationSec,
+      timeline: buildTimelineDocument({
+        range: { start: Number(trimStart) || 0, end: Number(trimEnd) || 0 },
+        sourceDuration: sourceDurationSec,
+        events: timelineEventsRef.current,
+      }),
     };
     // Mirror immediately into local memory so a reload restores it. Merge over
     // the FULL session (state) + any retained module session so session_token,
@@ -554,7 +630,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }).catch(() => {});
     }, 700);
     return () => clearTimeout(t);
-  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction, headerRegion]);
+  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction, headerRegion, sourceDurationSec]);
 
   // Snapshot the inline field's selection EAGERLY, during the event.
   //
@@ -567,6 +643,46 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     if (!snapshot) return;
     setHeaderInlineSelection((cur) => keepSelection(cur, snapshot, titleOverlayText.length));
   };
+
+  // --- 3c. Preview the SELECTED range (browser-native) ---------------------
+  // Seeks the existing preview element to START, plays, and pauses at END.
+  // This is playback of media the browser already holds: it issues no render,
+  // no registration, no asset version, no review card and no acquisition.
+  const stopSelectionPreview = useCallback(() => {
+    previewingRef.current = false;
+    setPreviewing(false);
+    if (previewListenerRef.current) {
+      previewListenerRef.current();
+      previewListenerRef.current = null;
+    }
+    const v = videoRef.current;
+    if (v) { try { v.pause(); } catch (_) { /* ignore */ } }
+  }, []);
+
+  const previewSelection = useCallback(() => {
+    const v = videoRef.current;
+    const s = Number(trimStart);
+    const e2 = Number(trimEnd);
+    if (!v || !Number.isFinite(s) || !Number.isFinite(e2) || e2 <= s) return;
+    stopSelectionPreview();
+    previewingRef.current = true;
+    setPreviewing(true);
+    try { v.currentTime = s; } catch (_) { /* ignore */ }
+    const onTime = () => {
+      if (!previewingRef.current) return;
+      if (v.currentTime >= e2 - 0.001) stopSelectionPreview();
+    };
+    v.addEventListener('timeupdate', onTime);
+    previewListenerRef.current = () => v.removeEventListener('timeupdate', onTime);
+    const p = v.play?.();
+    if (p && typeof p.catch === 'function') p.catch(() => { /* autoplay policy */ });
+  }, [trimStart, trimEnd, stopSelectionPreview]);
+
+  // Never leave a listener or a playing element behind on unmount.
+  useEffect(() => () => {
+    if (previewListenerRef.current) previewListenerRef.current();
+    previewListenerRef.current = null;
+  }, []);
 
   // --- 4. Apply caption + rerender + register + card -------------------------------
   const handleRerender = useCallback(async () => {
@@ -804,6 +920,14 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           caption_changes, crop_reframe_changes,
           instruction: instruction.trim() || undefined, llm_assist_used: false,
           edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, header_applied: headerApplied, framing, segments,
+            // LOOM owns correction/event persistence; the type-aware timeline
+            // document rides the existing jsonb — no schema change. This is the
+            // exact place a future typed edit event is added.
+            timeline: buildTimelineDocument({
+              range: { start: Number(trimStart) || 0, end: Number(trimEnd) || 0 },
+              sourceDuration: sourceDurationSec,
+              events: timelineEventsRef.current,
+            }),
             // The durable record of the hook's range styling, so the render
             // contract keeps the same semantics the preview showed.
             hook_rich: hookApplied ? serializeRich(normalizeRich({ text: hook.trim(), base: hookRich.base, spans: hookRich.spans })) : null,
@@ -838,7 +962,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     } finally {
       setRerendering(false);
     }
-  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, instruction, realigned, needsRealignment, trimInvalid]);
+  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, instruction, realigned, needsRealignment, trimInvalid, sourceDurationSec]);
 
   const handleDownload = useCallback(async () => {
     if (!downloadUrl) return;
@@ -911,6 +1035,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
               region={headerRegion}
               currentTime={videoTime}
               onTimeUpdate={setVideoTime}
+              onDurationChange={setMeasuredDurationSec}
+              muted={!previewing}
               maxWidth={420}
             >
               <div className="absolute top-3 left-3">
@@ -1072,15 +1198,35 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
 
               <div>
                 <span className="eyebrow block mb-1">trim</span>
-                <div className="grid grid-cols-2 gap-2">
+                {/* The SAME trim state, two views: the visual track (drag the
+                    handles, click the track to aim the monitor, ±1s on either
+                    edge) and the numeric fields. Both write through setRange,
+                    which clamps into the available source — neither can create
+                    an invalid range, and neither can move a boundary past the
+                    start of the source or the end of the source. */}
+                <RangeTimeline
+                  sourceDuration={sourceDurationSec}
+                  start={Number(trimStart) || 0}
+                  end={Number(trimEnd) || 0}
+                  words={[]}
+                  sourceBoundSource={sourceBoundSource}
+                  onCommitRange={setRange}
+                  onSeek={(t) => seekTo(videoRef, t)}
+                  onPreviewSelection={previewSelection}
+                  onStopPreview={stopSelectionPreview}
+                  previewing={previewing}
+                  currentTime={videoTime}
+                  disabled={rerendering}
+                />
+                <div className="grid grid-cols-2 gap-2 mt-2">
                   <label className="text-xs text-muted">start (s)
                     <input type="number" step="0.1" value={trimStart}
-                      onChange={(e) => { setTrimStart(e.target.value); seekTo(videoRef, e.target.value); }}
+                      onChange={(e) => { setRange({ start: e.target.value, end: Number(trimEnd) }); seekTo(videoRef, e.target.value); }}
                       className="input-field mt-1" />
                   </label>
                   <label className="text-xs text-muted">end (s)
                     <input type="number" step="0.1" value={trimEnd}
-                      onChange={(e) => { setTrimEnd(e.target.value); seekTo(videoRef, e.target.value); }}
+                      onChange={(e) => { setRange({ start: Number(trimStart), end: e.target.value }); seekTo(videoRef, e.target.value); }}
                       className="input-field mt-1" />
                   </label>
                 </div>

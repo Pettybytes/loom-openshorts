@@ -43,6 +43,15 @@ export default function PreviewSurface({
     maxWidth = 420,
     className = '',
     children,
+    // Additive, default-preserving: the accepted preview autoplays muted. The
+    // editor unmutes ONLY while it is previewing the selected range, because
+    // the operator has to be able to HEAR the cut before rendering it.
+    muted = true,
+    // Reports the media element's OWN duration. For a durable source launch the
+    // element is the original file, so this is the authoritative answer to
+    // "how much source is actually available?" — see lib/timelineState.js
+    // resolveSourceDuration().
+    onDurationChange,
 }) {
     const [videoAspect, setVideoAspect] = useState(FRAME_ASPECT);
     const canvas = canvasLayout(region, videoAspect);
@@ -76,7 +85,7 @@ export default function PreviewSurface({
                         objectFit: 'cover',
                     }}
                     controls
-                    muted
+                    muted={muted}
                     playsInline
                     autoPlay
                     loop
@@ -85,7 +94,9 @@ export default function PreviewSurface({
                         if (v?.videoWidth && v?.videoHeight) {
                             setVideoAspect(v.videoWidth / v.videoHeight);
                         }
+                        onDurationChange?.(v?.duration);
                     }}
+                    onDurationChange={(e) => onDurationChange?.(e.currentTarget.duration)}
                     onTimeUpdate={(e) => onTimeUpdate?.(e.currentTarget.currentTime)}
                 />
                 <TextOverlayPreview
