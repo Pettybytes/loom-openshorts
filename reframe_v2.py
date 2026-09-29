@@ -27,6 +27,7 @@ import punch_in
 import screencast_layout
 import layout_ranges
 import split_layout
+import visual_state
 from ffmpeg_utils import (video_encode_args, escape_filter_value, QUALITY_FAST,
                           METADATA_SCRUB)
 
@@ -110,6 +111,68 @@ def concat_list_content(segment_paths):
     return "".join(f"file '{p}'\n" for p in segment_paths)
 
 
+# --- resolved composition records (what the render ACTUALLY used) -----------
+#
+# These describe one scene's composition in the terms the filtergraph used, so
+# a downstream consumer can reproduce it instead of re-deriving it from the
+# layout label. They deliberately record the numbers, not a verdict.
+
+def _crop_window_composition(frames, fps, start_frame):
+    """TRACK/ALTERNATE: a source-pixel crop window whose x (and, when a beat
+    armed a punch-in, whose size) moves over the scene."""
+    return {
+        "representation": "crop_window",
+        "basis": "source_pixels",
+        "change_points": visual_state.change_points(
+            frames, fps, start_frame=start_frame),
+    }
+
+
+def _general_composition(content_height, mode):
+    """GENERAL/WIDE: a scaled foreground centred over a blurred cover bed.
+
+    NOT a crop. The bed is the source scaled to cover the canvas, centre-
+    cropped and blurred (sigma ``GENERAL_BACKGROUND_BLUR_SIGMA``); the
+    foreground is the source scaled to ``content_height`` and centred, with any
+    overflow past the canvas width clipped by the frame itself.
+    """
+    return {
+        "representation": "general",
+        "mode": mode,
+        "content_height": int(content_height),
+        "placement": "center",
+        "overflow": "canvas_clipped",
+        "background": "blurred_cover",
+        "background_blur_sigma": GENERAL_BACKGROUND_BLUR_SIGMA,
+    }
+
+
+def _split_composition(left, right):
+    """SPLIT: two source-pixel centres stacked one above the other."""
+    return {
+        "representation": "split",
+        "basis": "source_pixels",
+        "top": [float(v) for v in left],
+        "bottom": [float(v) for v in right],
+    }
+
+
+def _screencast_composition(centre):
+    return {
+        "representation": "screencast",
+        "basis": "source_pixels",
+        "centre": [float(v) for v in centre] if centre else None,
+    }
+
+
+def _inset_composition(inset):
+    return {
+        "representation": "camera_inset",
+        "basis": "source_pixels",
+        "inset": [float(v) for v in inset] if inset else None,
+    }
+
+
 # How much of the frame height the real content should fill in GENERAL layout.
 #
 # Fitting a 16:9 source to the full output width leaves it 608px tall in a
@@ -128,11 +191,27 @@ def concat_list_content(segment_paths):
 GENERAL_CONTENT_HEIGHT_RATIO = float(
     os.environ.get("GENERAL_CONTENT_HEIGHT_RATIO", "0.42"))
 
+# Gaussian sigma of the general composition's background bed. Named so the
+# resolved-state record quotes the same number the filtergraph applies.
+GENERAL_BACKGROUND_BLUR_SIGMA = 12
+
 
 def full_width_content_height(orig_w, orig_h, out_w):
     """Height the source fills when its FULL width is kept (even)."""
     fg_h = int(round(out_w * orig_h / float(orig_w)))
     return fg_h + (fg_h % 2)
+
+
+def general_content_height(out_w, out_h, orig_w=None, orig_h=None, content_h=None):
+    """Height the foreground content fills in a general composition (even).
+
+    Shared by the filtergraph and by the resolved-state record so the persisted
+    number cannot drift from the one the render actually used.
+    """
+    fg_h = content_h if content_h else int(out_h * GENERAL_CONTENT_HEIGHT_RATIO)
+    if orig_w and orig_h:
+        fg_h = max(fg_h, full_width_content_height(orig_w, orig_h, out_w))
+    return fg_h + fg_h % 2
 
 
 def general_filtergraph(out_w, out_h, content_h=None, orig_w=None, orig_h=None):
@@ -151,14 +230,11 @@ def general_filtergraph(out_w, out_h, content_h=None, orig_w=None, orig_h=None):
     an already-9:16 upload came back as a 453px sliver floating over a blurred
     copy of itself. Filling the width is the floor, never the target.
     """
-    fg_h = content_h if content_h else int(out_h * GENERAL_CONTENT_HEIGHT_RATIO)
-    if orig_w and orig_h:
-        fg_h = max(fg_h, full_width_content_height(orig_w, orig_h, out_w))
-    fg_h += fg_h % 2
+    fg_h = general_content_height(out_w, out_h, orig_w, orig_h, content_h)
     return (
         f"[0:v]split=2[bga][fga];"
         f"[bga]scale=-2:{out_h},crop=w=min(iw\\,{out_w}):h={out_h},"
-        f"scale={out_w}:{out_h},gblur=sigma=12[bg];"
+        f"scale={out_w}:{out_h},gblur=sigma={GENERAL_BACKGROUND_BLUR_SIGMA}[bg];"
         # Scale by HEIGHT, then trim any overflow to the output width. crop
         # centres by default, and min() makes it a no-op when the scaled source
         # is already narrower than the frame (portrait/square sources).
@@ -342,7 +418,8 @@ def _run(cmd):
 
 
 def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
-           force_strategy=None, crop_overrides=None):
+           force_strategy=None, crop_overrides=None, output_format=None,
+           asset_version=""):
     """Full v2 reframe of one clip. Raises on failure (caller falls back).
 
     ``content_ranges`` comes from screencast_layout.detect_content_ranges() on
@@ -358,6 +435,16 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     listed keep the automatic camera, so correcting one bad shot never disturbs
     the ones the tracker got right. Applied AFTER force_strategy: a per-scene
     hand position always beats the whole-clip choice for the scenes it names.
+
+    ``output_format`` is the operator's chosen format ('vertical' / 'square' /
+    'horizontal' / 'auto'), recorded as the canvas the render produced so a
+    downstream consumer never has to guess it. ``asset_version`` is optional
+    LOOM ownership metadata, stamped when the caller already knows it.
+
+    On the way out it records the RESOLVED composition it just rendered
+    (``visual_state``) beside the legacy layout ranges, at the end of the same
+    sidecar. Best effort, deliberately: a render that already succeeded must
+    never fail over its own bookkeeping.
     """
     import main as m
     content_ranges = content_ranges or []
@@ -524,6 +611,18 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
         raise RuntimeError("no usable scene ranges")
     workdir = tempfile.mkdtemp(prefix="reframe_v2_")
     segments = []
+    scene_records = []
+    # Scenes the operator framed by hand, keyed by the scene's START FRAME
+    # rather than its index: scene_frame_ranges() drops empty ranges, so the
+    # loop's own index does not line up with the scene list.
+    manual_start_frames = set()
+    for raw_idx in (crop_overrides or {}):
+        try:
+            scene_idx = int(raw_idx)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= scene_idx < len(scene_boundaries):
+            manual_start_frames.add(scene_boundaries[scene_idx][0])
     try:
         for idx, (start_f, end_f, strategy) in enumerate(ranges):
             seg_path = os.path.join(workdir, f"seg_{idx:03d}.mp4")
@@ -533,20 +632,26 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
             if strategy == 'INSET':
                 graph = camera_inset.inset_filtergraph(
                     orig_w, orig_h, out_w, out_h, inset)
+                composition = _inset_composition(inset)
             elif strategy == 'SCREENCAST':
                 graph = screencast_layout.screencast_filtergraph(
                     orig_w, orig_h, out_w, out_h, screencasts[start_f])
+                composition = _screencast_composition(screencasts.get(start_f))
             elif strategy == 'WIDE':
-                graph = general_filtergraph(
-                    out_w, out_h,
-                    full_width_content_height(orig_w, orig_h, out_w))
+                content_h = full_width_content_height(orig_w, orig_h, out_w)
+                graph = general_filtergraph(out_w, out_h, content_h)
+                composition = _general_composition(content_h, mode="full_width")
             elif strategy == 'SPLIT':
                 left, right = splits[start_f]
                 graph = split_layout.split_filtergraph(
                     orig_w, orig_h, out_w, out_h, left, right)
+                composition = _split_composition(left, right)
             elif strategy == 'GENERAL':
                 graph = general_filtergraph(out_w, out_h,
                                             orig_w=orig_w, orig_h=orig_h)
+                composition = _general_composition(
+                    general_content_height(out_w, out_h, orig_w, orig_h),
+                    mode="general")
             else:
                 seg_xs = [x if x is not None else 0 for x in xs[start_f:end_f]]
                 cmd_path = os.path.join(workdir, f"cmd_{idx:03d}.txt")
@@ -558,6 +663,10 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                     lines = punch_in.sendcmd_lines(boxes, fps)
                     first = boxes[0]
                     init = f"w={first[0]}:h={first[1]}:x={first[2]}:y={first[3]}"
+                    # punch_in.crop_boxes yields (w, h, x, y); the record is
+                    # always (x, w, h, y) so the geometry reads the same way
+                    # whether or not a beat armed a zoom.
+                    frames = [(b[2], b[0], b[1], b[3]) for b in boxes]
                 else:
                     lines = dedupe_sendcmd_lines(seg_xs, fps)
                     # sendcmd only ever moves x, so y is whatever it starts as.
@@ -567,6 +676,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                     # instead of trimming both ends.
                     crop_y = max(0, (orig_h - crop_h) // 2)
                     init = f"w={crop_w}:h={crop_h}:x={seg_xs[0]}:y={crop_y}"
+                    frames = [(x, crop_w, crop_h, crop_y) for x in seg_xs]
                 with open(cmd_path, "w") as f:
                     f.write("\n".join(lines) + "\n")
                 graph = (
@@ -574,6 +684,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                     f"crop@c={init},"
                     f"scale={out_w}:{out_h},setsar=1[v]"
                 )
+                composition = _crop_window_composition(frames, fps, start_f)
 
             _run([
                 "ffmpeg", "-y", "-loglevel", "error",
@@ -582,6 +693,11 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                 *video_encode_args(QUALITY_FAST), "-an", seg_path,
             ])
             segments.append(seg_path)
+            scene_records.append(visual_state.scene_record(
+                start=start_f / fps, end=end_f / fps,
+                start_frame=start_f, end_frame=end_f, strategy=strategy,
+                composition=composition,
+                manual=start_f in manual_start_frames))
 
         list_path = os.path.join(workdir, "concat.txt")
         with open(list_path, "w") as f:
@@ -605,8 +721,22 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
         import shutil
         shutil.rmtree(workdir, ignore_errors=True)
 
-    # Tell the caption pass which stretches are stacked (see layout_ranges).
+    # Tell the caption pass which stretches are stacked (see layout_ranges), and
+    # record the composition this render actually produced (see visual_state).
+    # Both travel in the one sidecar. Best effort: a render that already
+    # succeeded must never fail because its bookkeeping could not be written.
+    try:
+        state = visual_state.build_state(
+            output_format=output_format, aspect_ratio=aspect_ratio,
+            width=out_w, height=out_h, fps=fps,
+            source_width=orig_w, source_height=orig_h,
+            scenes=scene_records, output_path=final_output_video,
+            asset_version=asset_version)
+    except (OSError, ValueError) as e:
+        print(f"   ⚠️ Could not record the resolved visual state ({type(e).__name__})")
+        state = None
     layout_ranges.write(final_output_video,
-                        [(s / fps, e / fps, strategy) for s, e, strategy in ranges])
+                        [(s / fps, e / fps, strategy) for s, e, strategy in ranges],
+                        visual_state=state)
     print(f"   ✅ Clip saved to {final_output_video}")
     return True

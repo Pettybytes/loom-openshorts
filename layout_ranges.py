@@ -19,19 +19,44 @@ import os
 
 SIDECAR_SUFFIX = ".layout.json"
 
+#: Top-level sidecar key holding the RESOLVED composition (see
+#: ``visual_state``). Additive and separate from ``ranges`` on purpose: the
+#: legacy range objects have a fixed ``{start,end,layout}`` shape, so geometry
+#: stuffed into them would be dropped by ``normalise()`` and would change what
+#: every existing reader sees.
+VISUAL_STATE_KEY = "visual_state"
+
 
 def sidecar_path(video_path):
     return video_path + SIDECAR_SUFFIX
 
 
-def write(video_path, ranges):
+def _read_payload(video_path):
+    """The sidecar's raw object, or {} (absent, v1 render, hand-edited junk)."""
+    try:
+        with open(sidecar_path(video_path)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write(video_path, ranges, visual_state=None):
     """``ranges``: iterable of (start_s, end_s, strategy). Best effort: a
-    failure here must never fail a render that already succeeded."""
+    failure here must never fail a render that already succeeded.
+
+    ``visual_state`` is the additive resolved block (see ``visual_state``);
+    omitting it leaves the legacy sidecar exactly as it was, so every existing
+    caller keeps writing the same file it always did.
+    """
     payload = [{"start": round(float(s), 3), "end": round(float(e), 3),
                 "layout": str(layout).lower()} for s, e, layout in ranges]
+    body = {"ranges": payload}
+    if visual_state:
+        body[VISUAL_STATE_KEY] = visual_state
     try:
         with open(sidecar_path(video_path), "w") as f:
-            json.dump({"ranges": payload}, f)
+            json.dump(body, f)
     except OSError:
         pass
     return payload
@@ -40,12 +65,36 @@ def write(video_path, ranges):
 def read(video_path):
     """The ranges recorded for this file, or [] (no sidecar, v1 render, or
     a file that was never reframed)."""
-    try:
-        with open(sidecar_path(video_path)) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return []
-    return normalise(data.get("ranges"))
+    return normalise(_read_payload(video_path).get("ranges"))
+
+
+def read_visual_state(video_path):
+    """The RESOLVED composition block for this file, or None.
+
+    None means "the render did not record one" — an old sidecar, a v1 render, a
+    file that was never reframed, or a block whose shape is not one we wrote.
+    This function never synthesises a block from the legacy layout ranges: a
+    label is not geometry (see ``visual_state``).
+    """
+    state = _read_payload(video_path).get(VISUAL_STATE_KEY)
+    return state if isinstance(state, dict) else None
+
+
+def write_visual_state(video_path, state, ranges=None):
+    """Replace only the resolved block, keeping whatever ranges are recorded.
+
+    ``ranges=None`` reads the existing ranges back out of the sidecar so a
+    caller that owns only the composition does not have to restate them (and
+    cannot accidentally erase them).
+    """
+    if ranges is None:
+        ranges = read(video_path)
+    return write(video_path, [(r["start"], r["end"], r["layout"])
+                              for r in normalise(ranges)], visual_state=state)
+
+
+def has_visual_state(video_path):
+    return read_visual_state(video_path) is not None
 
 
 def normalise(ranges):

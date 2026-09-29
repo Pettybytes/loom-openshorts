@@ -316,10 +316,20 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
             # No reframe means no fresh layout sidecar; the captions would fall
             # back to the bottom on a stacked clip. Carry the input's layout
             # ranges through the cut instead (empty when the input has none).
+            #
+            # The resolved visual state travels the same way, but it is NOT
+            # restored to "resolved": this cut wrote different bytes, so the
+            # input's geometry no longer owns the output. It is carried
+            # remapped and marked unresolved, which is the honest answer — a
+            # consumer that needs authoritative state resolves it through the
+            # render path rather than trusting (or silently losing) this block.
             import layout_ranges
+            import visual_state
             layout_ranges.write(out_path, [
                 (r["start"], r["end"], r["layout"])
-                for r in layout_ranges.remap(layout_ranges.read(input_path), segments)])
+                for r in layout_ranges.remap(layout_ranges.read(input_path), segments)],
+                visual_state=visual_state.remap_state(
+                    layout_ranges.read_visual_state(input_path), segments))
 
         if watermark:
             (watermarker or _main_attr("apply_watermark"))(out_path)

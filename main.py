@@ -1109,6 +1109,42 @@ def auto_hook_clip(clip_path, clip):
         return None
 
 
+def _record_passthrough_state(input_video, final_output_video, output_format):
+    """Record the resolved state of a native-framing export (best effort).
+
+    A horizontal export is a remux: the composition is the identity, and the
+    canvas is the source's own. Recording it here — at the producer, from the
+    file that actually exists — is what stops a consumer from having to assume
+    a format for an operator who explicitly chose one.
+    """
+    try:
+        import json as _json
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,avg_frame_rate",
+             "-show_entries", "format=duration", "-of", "json", final_output_video],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
+        info = _json.loads(probe.stdout.decode() or "{}")
+        stream = (info.get("streams") or [{}])[0]
+        width, height = int(stream.get("width") or 0), int(stream.get("height") or 0)
+        num, _, den = str(stream.get("avg_frame_rate") or "0/0").partition("/")
+        fps = float(num) / float(den) if float(den or 0) else 0.0
+        duration = float((info.get("format") or {}).get("duration") or 0.0)
+        if not (width and height and duration):
+            return False
+        import layout_ranges
+        import visual_state
+        state = visual_state.passthrough_state(
+            output_format=output_format, width=width, height=height, fps=fps,
+            duration=duration, output_path=final_output_video)
+        layout_ranges.write_visual_state(final_output_video, state)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"   ⚠️ Could not record the passthrough visual state "
+              f"({type(e).__name__})")
+        return False
+
+
 def render_clip(input_video, final_output_video, output_format="auto",
                 force_strategy=None, crop_overrides=None):
     """Route a cut clip through the right renderer for the chosen output format.
@@ -1118,11 +1154,17 @@ def render_clip(input_video, final_output_video, output_format="auto",
     individual scenes by hand (the per-scene reframing editor) and wins over
     ``force_strategy`` for the scenes it names."""
     if output_format == "horizontal":
-        return finalize_clip_passthrough(input_video, final_output_video)
+        ok = finalize_clip_passthrough(input_video, final_output_video)
+        if ok:
+            # Native framing is a real composition choice, so its resolved
+            # state is recorded rather than left to a consumer's guess.
+            _record_passthrough_state(input_video, final_output_video, output_format)
+        return ok
     aspect = 1.0 if output_format == "square" else ASPECT_RATIO
     return process_video_to_vertical(input_video, final_output_video, aspect_ratio=aspect,
                                      force_strategy=force_strategy,
-                                     crop_overrides=crop_overrides)
+                                     crop_overrides=crop_overrides,
+                                     output_format=output_format)
 
 
 # Watermark geometry, as fractions of the clip width/height.
@@ -1191,7 +1233,8 @@ def apply_watermark(video_path):
 
 
 def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPECT_RATIO,
-                              force_strategy=None, crop_overrides=None):
+                              force_strategy=None, crop_overrides=None,
+                              output_format=None):
     """
     Core logic to reframe a horizontal video to a target aspect ratio using
     scene detection and Active Speaker Tracking (MediaPipe).
@@ -1199,6 +1242,8 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
     force_strategy / crop_overrides pin layouts and scene crops by hand (v2
     engine only — the v1 loop below has no layout concept beyond its own
     classifier).
+    output_format is the operator's chosen format, recorded in the resolved
+    visual state so the choice survives to a consumer (see visual_state).
     """
     # v2 engine: analyze downscaled, render natively in ffmpeg. Any failure
     # falls back to the v1 frame loop below so a v2 edge case can't kill jobs.
@@ -1208,7 +1253,8 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
             t0 = time.time()
             result = reframe_v2.render(input_video, final_output_video, aspect_ratio,
                                        force_strategy=force_strategy,
-                                       crop_overrides=crop_overrides)
+                                       crop_overrides=crop_overrides,
+                                       output_format=output_format)
             print(f"   ⏱️ Reframe v2 total: {time.time() - t0:.1f}s")
             return result
         except Exception as e:
