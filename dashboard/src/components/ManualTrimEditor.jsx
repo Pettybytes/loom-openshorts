@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Download, Wand2, Type, Scissors, Crosshair, ArrowLeft, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Download, Wand2, Type, Scissors, Crosshair, ArrowLeft, Loader2, CheckCircle2, AlertCircle, Film } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch, setEditorSessionToken, clearEditorSessionToken, editorTokenFingerprint, getEditorSessionToken } from '../lib/api';
 import { realignCaptions } from '../lib/captionRealign';
@@ -179,6 +179,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [showSubtitleModal, setShowSubtitleModal] = useState(false);
   const [showHookModal, setShowHookModal] = useState(false);
+  // "Finish in CapCut" — OPTIONAL lane state. Kept local to the editor and
+  // independent of rerender/registration: a failure here must never disturb an
+  // in-progress edit.
+  const [capcutBusy, setCapcutBusy] = useState(false);
+  const [capcutResult, setCapcutResult] = useState(null);
 
   const videoRef = useRef(null);
   // Selection-preview plumbing. The listener is removed explicitly (and on
@@ -983,6 +988,36 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     }
   }, [downloadUrl, session]);
 
+  // "Finish in CapCut" — hand the version the operator is CURRENTLY viewing to
+  // CapCut as an editable project. This is the same one-way handoff the lane is
+  // built on: it renders nothing, registers no asset version, triggers no CI and
+  // publishes nothing. The adapter writes the project locally and reports where
+  // it landed (CapCut's own project store), which the operator then opens.
+  const handleFinishInCapCut = useCallback(async () => {
+    if (!session?.edit_session_id) return;
+    setCapcutBusy(true);
+    setCapcutResult(null);
+    try {
+      const res = await apiFetch('/discord/editor/capcut', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ edit_session_id: session.edit_session_id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        setCapcutResult({ ok: false, message: data?.reason || data?.error || `HTTP ${res.status}` });
+        return;
+      }
+      setCapcutResult({
+        ok: true, draftName: data.draft_name, draftPath: data.draft_path,
+        captions: data.captions,
+      });
+    } catch (e) {
+      setCapcutResult({ ok: false, message: e?.message || String(e) });
+    } finally {
+      setCapcutBusy(false);
+    }
+  }, [session]);
+
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center bg-paper text-ink2"><p className="text-sm text-muted">Opening editor session…</p></div>;
   }
@@ -1281,6 +1316,28 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
               </div>
             )}
 
+            {capcutResult && (
+              <div className={`mb-4 text-xs rounded-input p-3 border space-y-1 ${capcutResult.ok ? 'text-ink bg-background border-rule' : 'text-amber-300 bg-amber-400/10 border-amber-400/20'}`}>
+                {capcutResult.ok ? (
+                  <>
+                    <p className="flex items-center gap-2">
+                      <CheckCircle2 size={14} className="text-ok shrink-0" />
+                      CapCut project created — open CapCut to finish it.
+                    </p>
+                    <p className="text-muted break-all">{capcutResult.draftPath}</p>
+                    {capcutResult.captions?.included === false && (
+                      <p className="text-muted">{capcutResult.captions.reason}</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="flex items-start gap-2">
+                    <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                    <span>{capcutResult.message}</span>
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Actions */}
             <div className="grid grid-cols-2 gap-2 mt-auto pt-4 border-t border-rule">
               <button onClick={handleRerender} disabled={rerendering || !edl || needsRealignment || trimInvalid}
@@ -1295,6 +1352,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
               <button onClick={handleDownload} disabled={!downloadUrl && !clipUrl}
                 className="btn-quiet flex-col gap-1 py-2.5 px-1 text-[11px] leading-none rounded-input whitespace-nowrap">
                 <Download size={16} /> download
+              </button>
+              <button onClick={handleFinishInCapCut} disabled={capcutBusy || rerendering}
+                className="btn-quiet col-span-2 flex-row gap-2 py-2.5 px-1 text-[11px] leading-none rounded-input whitespace-nowrap disabled:opacity-45">
+                {capcutBusy ? <Loader2 size={16} className="animate-spin" /> : <Film size={16} />}
+                Finish in CapCut
               </button>
               {session?.launch_guild_id && session?.launch_channel_id ? (
                 <a href={`https://discord.com/channels/${session.launch_guild_id}/${session.launch_channel_id}`}
