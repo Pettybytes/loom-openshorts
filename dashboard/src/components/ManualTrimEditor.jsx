@@ -22,6 +22,15 @@ import { buildPreviewState } from '../lib/editorPreviewState';
 import { normalizeRich, serializeRich, isEmptyBase } from '../lib/richText';
 import { keepSelection, readSelection } from '../lib/rangeSelection';
 import { resolveClipIdentity, clipApiPath, jobApiPath } from '../lib/clipIdentity';
+import {
+  AUTO_START_COMPLETED,
+  AUTO_START_FAILED,
+  AUTO_START_RUNNING,
+  autoStartDecision,
+  autoStartRecord,
+  readAutoStartGuard,
+  writeAutoStartGuard,
+} from '../lib/autoStart';
 
 // Relative public paths: the editor is served from the same public origin as
 // the LOOM adapter (Caddy funnel), so the exchange/complete calls and the
@@ -185,7 +194,16 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   const [capcutBusy, setCapcutBusy] = useState(false);
   const [capcutResult, setCapcutResult] = useState(null);
 
+  // One-time Auto Edit auto-start. `autoStart` is the record mirrored into the
+  // durable draft; the decision and its guards live in lib/autoStart.js.
+  const [autoStart, setAutoStart] = useState(null);
+
   const videoRef = useRef(null);
+  // The auto-start effect must call the LATEST handleRerender without taking a
+  // dependency on it (that identity changes on every keystroke and would
+  // re-trigger the effect), and must run at most once per mounted editor.
+  const handleRerenderRef = useRef(null);
+  const autoStartInvokedRef = useRef(false);
   // Selection-preview plumbing. The listener is removed explicitly (and on
   // unmount) so repeat previews cannot stack timeupdate handlers.
   const previewListenerRef = useRef(null);
@@ -610,6 +628,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         alignment: titleOverlayAlignment,
       },
       instruction,
+      // The DURABLE half of the one-time auto-start guard (lib/autoStart.js).
+      // Written with the draft so a reopen from a review card — where module
+      // memory and refs are gone — reads back "already started" instead of
+      // starting a second render.
+      auto_start: autoStart || undefined,
       // The timeline document is the durable, ADDITIVE home for typed edit
       // events (lib/timelineState.js). Phase 2A writes exactly the range; the
       // shape is already the seam for split/remove/reorder/sfx/transition/
@@ -635,7 +658,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }).catch(() => {});
     }, 700);
     return () => clearTimeout(t);
-  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction, headerRegion, sourceDurationSec]);
+  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction, headerRegion, sourceDurationSec, autoStart]);
 
   // Snapshot the inline field's selection EAGERLY, during the event.
   //
@@ -691,10 +714,12 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
 
   // --- 4. Apply caption + rerender + register + card -------------------------------
   const handleRerender = useCallback(async () => {
-    if (!session) { setError('Editor session is missing — reopen the clip from the review card.'); return; }
-    if (!edl) { setError('Clip recipe is unavailable — the render job may have expired. Reopen the review card to retry.'); return; }
-    if (needsRealignment) { setError('Caption edit requires audio realignment — not rerendering.'); return; }
-    if (trimInvalid) { setError('Trim range is invalid (start must be before end).'); return; }
+    // Returns true only when a version was actually registered. The one-time
+    // auto-start records that outcome, so a failure is never marked done.
+    if (!session) { setError('Editor session is missing — reopen the clip from the review card.'); return false; }
+    if (!edl) { setError('Clip recipe is unavailable — the render job may have expired. Reopen the review card to retry.'); return false; }
+    if (needsRealignment) { setError('Caption edit requires audio realignment — not rerendering.'); return false; }
+    if (trimInvalid) { setError('Trim range is invalid (start must be before end).'); return false; }
     setRerendering(true); setResult(null); setError(null); setReauthNeeded(false);
     setProgress({ stage: 'save', detail: 'Persisting draft…' });
     try {
@@ -728,6 +753,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         setError(`${label} step failed (HTTP ${res.status}). Nothing was registered — fix and retry.`);
         setProgress(null);
         setRerendering(false);
+        return false;
       };
 
       const caption_changes = {
@@ -773,6 +799,11 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             hook_rich: serializeRich(hookRich), hook_entrance: hookEntrance,
             header_rich: serializeRich(headerRich),
             instruction,
+            // Freshest durable value (the auto-start record is written before
+            // this call), so the server copy can never lag the guard.
+            auto_start: (session?.edit_session_id
+              ? readAutoStartGuard()[session.edit_session_id]
+              : null) || autoStart || undefined,
           },
         }),
       });
@@ -803,7 +834,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         setRerendering(false);
         return;
       }
-      if (!rrRes.ok) { setError('Rerender failed: ' + (rrData?.detail || rrData?.error || rrRes.status)); setProgress(null); setRerendering(false); return; }
+      if (!rrRes.ok) { setError('Rerender failed: ' + (rrData?.detail || rrData?.error || rrRes.status)); setProgress(null); setRerendering(false); return false; }
 
       // Chain subsequent burns off the freshly recut file.
       let currentFile = rrData?.new_video_url ? outputBasename(rrData.new_video_url) : null;
@@ -833,8 +864,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           // A failed burn must NEVER be swallowed: completing here would
           // register the PRE-overlay render as a success and the review card
           // would show a clip with no hook at all.
-          failStep(hRes, 'Hook');
-          return;
+          return failStep(hRes, 'Hook');
         }
         const hData = await hRes.json();
         if (hData?.new_video_url) currentFile = outputBasename(hData.new_video_url);
@@ -893,8 +923,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           // the Header burn failed, the failure was swallowed, and the
           // pre-Header render was registered as a successful version. Refuse to
           // complete instead — nothing is registered, and the error is shown.
-          failStep(headRes, 'Header');
-          return;
+          return failStep(headRes, 'Header');
         }
         const headData = await headRes.json();
         if (headData?.new_video_url) currentFile = outputBasename(headData.new_video_url);
@@ -956,18 +985,72 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         }),
       });
       const completeData = await completeRes.json();
-      if (!completeData.ok) { setError('Registration failed: ' + (completeData.error || 'unknown')); setProgress(null); setRerendering(false); return; }
+      if (!completeData.ok) { setError('Registration failed: ' + (completeData.error || 'unknown')); setProgress(null); setRerendering(false); return false; }
       clearStoredEditorSession(); _resolvedSession = null;
       setResult(completeData);
       setProgress({ stage: 'card', detail: null });
       setProgress({ stage: 'complete', detail: null });
+      return true;
     } catch (e) {
       setError('Rerender error: ' + (e && e.message ? e.message : String(e)));
       setProgress(null);
+      return false;
     } finally {
       setRerendering(false);
     }
   }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, instruction, realigned, needsRealignment, trimInvalid, sourceDurationSec]);
+
+  // Keep the auto-start effect pointed at the latest Auto Edit flow without
+  // depending on its identity (which changes on every keystroke).
+  handleRerenderRef.current = handleRerender;
+
+  // --- 4a. ONE-TIME auto-start of the existing Auto Edit flow ---------------
+  // Opening the editor for a version that still needs its FIRST draft runs the
+  // EXISTING chain once (handleRerender — the same path the `auto edit` button
+  // uses; no second flow, no duplicated stages, no pipeline change).
+  //
+  // The decision is durable, not a React ref: the record is written to
+  // sessionStorage AND mirrored into the server-side draft BEFORE the render
+  // starts, so a refresh, remount, StrictMode double-mount, websocket
+  // reconnect, session refresh or reopen from the review card cannot start a
+  // second render or a second version. lib/autoStart.js holds the rules.
+  useEffect(() => {
+    if (autoStartInvokedRef.current) return;      // one per mounted editor
+    if (loading || !session || !edl) return;      // wait for the real state
+    if (trimInvalid || needsRealignment) return;  // a render now could not be valid
+    const editSessionId = session.edit_session_id;
+    const decision = autoStartDecision({
+      editSessionId,
+      sessionStatus: session.status,
+      targetAssetVersion: session.target_asset_version,
+      draftAutoStart: session.draft?.auto_start,
+      guardRecord: readAutoStartGuard()[editSessionId],
+    });
+    if (!decision.run) return;
+    autoStartInvokedRef.current = true;
+    // Record BEFORE invoking, so anything that re-enters the editor while the
+    // render is in flight already sees `running` and cannot start another one.
+    const started = autoStartRecord(AUTO_START_RUNNING, Date.now());
+    writeAutoStartGuard(null, editSessionId, started);
+    setAutoStart(started);
+    let cancelled = false;
+    Promise.resolve(handleRerenderRef.current?.())
+      .then((ok) => {
+        if (cancelled) return;
+        // Never mark a failure as done: a failed run stays `failed` and the
+        // existing error + Retry affordance is what the operator sees.
+        const done = autoStartRecord(ok ? AUTO_START_COMPLETED : AUTO_START_FAILED, Date.now());
+        writeAutoStartGuard(null, editSessionId, done);
+        setAutoStart(done);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        const failed = autoStartRecord(AUTO_START_FAILED, Date.now());
+        writeAutoStartGuard(null, editSessionId, failed);
+        setAutoStart(failed);
+      });
+    return () => { cancelled = true; };
+  }, [loading, session, edl, trimInvalid, needsRealignment]);
 
   const handleDownload = useCallback(async () => {
     if (!downloadUrl) return;
