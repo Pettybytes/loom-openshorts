@@ -106,6 +106,10 @@ meaning is on the screen, not in the face.
    month", "3,400 stars") from the transcript or the current hook. Never a
    summary of the video's general topic, never a slogan that would fit any
    clip of this video, never drop a figure for a vaguer phrase.
+   Numbers and claims MUST be evidenced by the frames or transcript. If none
+   are evidenced, describe the visible action instead. Never invent a time
+   period, challenge, result, statistic or first-person experience. Current
+   hook/title text is an unverified suggestion, not evidence for any claim.
 3. `video_title_for_youtube_short`: max 100 chars, same rule, in
    TRANSCRIPT_LANGUAGE, no fake claims.
 

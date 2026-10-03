@@ -141,11 +141,11 @@ def _ask_gemini(frames, prompt, api_key):
     return json.loads(response.text) or {}
 
 
-def reground(clip_path, clip, transcript, start, end) -> Optional[dict]:
+def reground(clip_path, clip, transcript, start, end, *, api_key=None) -> Optional[dict]:
     """Rewrite ``clip['viral_hook_text']`` / ``video_title_for_youtube_short``
     in place from the clip's frames. Returns what changed (also stored under
     ``clip['hook_grounding']``), or None when skipped or failed."""
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = api_key or os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("   🪝 Hook grounding skipped: needs a Gemini key (frames), "
               "keeping the transcript hook.")

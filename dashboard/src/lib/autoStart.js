@@ -3,8 +3,8 @@
  *
  * Opening the editor for a version that still needs its FIRST draft runs the
  * EXISTING Auto Edit chain once, automatically. This module contains the
- * decision and the durable record only — it renders nothing, defines no
- * pipeline stage, and is not a second Auto Edit.
+ * decision, durable record and existing-endpoint bridge — it renders nothing,
+ * defines no analysis implementation, and is not a second Auto Edit.
  *
  * WHY THE GUARD IS DURABLE (and not a React ref)
  * ----------------------------------------------
@@ -75,6 +75,7 @@ export function autoStartDecision({
   targetAssetVersion,
   draftAutoStart,
   guardRecord,
+  sourceAutoEdit,
 } = {}) {
   if (!editSessionId) return { run: false, reason: 'no_session' };
   // A terminal session is never reopened for new mutations. An ABSENT status is
@@ -84,6 +85,12 @@ export function autoStartDecision({
     return { run: false, reason: `session_${String(sessionStatus)}` };
   }
   if (targetAssetVersion) return { run: false, reason: 'version_already_registered' };
+  // A new session for an already-generated version is not a new AI edit.
+  // An empty edit list is valid when Gemini deliberately chose no effects.
+  if (sourceAutoEdit?.status === AUTO_START_COMPLETED
+      && Array.isArray(sourceAutoEdit?.edit_plan?.edits)) {
+    return { run: false, reason: 'source_already_auto_edited' };
+  }
   if (guardRecord?.status) return { run: false, reason: `already_${guardRecord.status}` };
   if (draftAutoStart?.status) return { run: false, reason: `draft_already_${draftAutoStart.status}` };
   return { run: true, reason: 'first_draft_required' };
@@ -92,4 +99,31 @@ export function autoStartDecision({
 /** The record to persist at a given moment; one shape for storage and draft. */
 export function autoStartRecord(status, at) {
   return { started: true, status, at: Number(at) || 0 };
+}
+
+/** Invoke OpenShorts' EXISTING Gemini/FFmpeg editor; no analysis or rendering
+ * implementation lives here. Keep its actual applied plan alongside its output
+ * so the following overlay/registration steps cannot substitute the raw recut.
+ */
+export async function requestExistingAutoEdit({ apiFetch, jobId, clipIndex, inputFilename, geminiKey }) {
+  if (!inputFilename) throw new Error('Auto Edit needs the prepared clip.');
+  const res = await apiFetch('/api/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(geminiKey ? { 'X-Gemini-Key': geminiKey } : {}) },
+    body: JSON.stringify({ job_id: jobId, clip_index: clipIndex, input_filename: inputFilename, generate_copy: true }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data?.success) throw new Error(data?.detail || data?.error || `Auto Edit failed (HTTP ${res.status}).`);
+  if (!data.new_video_url || !Array.isArray(data.edit_plan?.edits)) {
+    throw new Error('Auto Edit did not return a generated video and resolved edit plan.');
+  }
+  return {
+    status: AUTO_START_COMPLETED,
+    provider: 'gemini',
+    endpoint: '/api/edit',
+    input_filename: inputFilename,
+    output_url: data.new_video_url,
+    edit_plan: data.edit_plan,
+    generated_copy: data.generated_copy || {},
+  };
 }

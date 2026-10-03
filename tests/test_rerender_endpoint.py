@@ -102,6 +102,82 @@ def fake_recut(monkeypatch):
     return calls
 
 
+class TestMissingEditorTranscript:
+    def test_source_review_transcribes_once_and_maps_canonical_clock(self, job, fake_recut, monkeypatch):
+        import subtitles
+        meta = json.loads(job['meta_path'].read_text())
+        meta['transcript'] = {'segments': []}
+        job['meta_path'].write_text(json.dumps(meta))
+        monkeypatch.setattr(app_module, '_locate_source', lambda _: None)
+        calls = []
+        def transcribe(path):
+            calls.append(path)
+            return {'language': 'en', 'segments': [{'start': 1, 'end': 2,
+                'words': [{'word': ' hello', 'start': 1, 'end': 2}]}]}
+        monkeypatch.setattr(subtitles, 'transcribe_audio', transcribe)
+        body = {'job_id': JOB_ID, 'clip_index': 0, 'segments': [{'start': 10, 'end': 20}],
+                'ensure_transcript': True}
+        for _ in range(2):
+            result = _request('POST', '/api/clip/rerender', body)
+            assert result.status_code == 200, result.text
+            assert result.json()['captions'] == [{'text': 'hello', 'startMs': 1000, 'endMs': 2000}]
+        assert len(calls) == 1
+        stored = json.loads(job['meta_path'].read_text())
+        assert stored['transcript']['segments'][0]['words'][0]['start'] == 11
+        assert stored['editor_transcription_complete'] is True
+        assert fake_recut[0]['captions_transcript']['segments'][0]['words'][0]['start'] == 1
+
+    def test_existing_words_never_retranscribed(self, job, fake_recut, monkeypatch):
+        import subtitles
+        monkeypatch.setattr(subtitles, 'transcribe_audio', lambda _: pytest.fail('unexpected ASR'))
+        r = _request('POST', '/api/clip/rerender', {'job_id': JOB_ID, 'clip_index': 0,
+            'segments': [{'start': 10, 'end': 30}], 'ensure_transcript': True})
+        assert r.status_code == 200
+
+    def test_asr_failure_does_not_render_or_mark_complete(self, job, fake_recut, monkeypatch):
+        import subtitles
+        meta = json.loads(job['meta_path'].read_text())
+        meta['transcript'] = {'segments': []}
+        job['meta_path'].write_text(json.dumps(meta))
+        def fail(_):
+            raise RuntimeError('ASR unavailable')
+        monkeypatch.setattr(subtitles, 'transcribe_audio', fail)
+        with pytest.raises(RuntimeError, match='ASR unavailable'):
+            _request('POST', '/api/clip/rerender', {'job_id': JOB_ID, 'clip_index': 0,
+                'segments': [{'start': 10, 'end': 30}], 'ensure_transcript': True})
+        assert not fake_recut
+        assert not json.loads(job['meta_path'].read_text()).get('editor_transcription_complete')
+
+
+class TestAutoEditGeneratedCopy:
+    def test_existing_grounding_writer_receives_request_key_and_persists_copy(self, job, monkeypatch):
+        import hook_grounding
+        from pathlib import Path
+        seen = []
+        def ground(path, clip, transcript, start, end, *, api_key=None):
+            seen.append((api_key, start, end))
+            clip.update(viral_hook_text='The show must go on',
+                        video_title_for_youtube_short='Cold plunge performance',
+                        hook_grounding={'frames': 3, 'on_screen': 'cold plunge'})
+            return clip['hook_grounding']
+        class Editor:
+            def __init__(self, api_key): pass
+            def upload_video(self, path): return 'uploaded'
+            def get_ffmpeg_filter(self, *args, **kwargs): return {'edits': [], 'filter_string': None}
+            def apply_edits(self, src, dest, plan): Path(dest).write_bytes(b'generated')
+        monkeypatch.setattr(hook_grounding, 'reground', ground)
+        monkeypatch.setattr(app_module, 'VideoEditor', Editor)
+        response = _request('POST', '/api/edit', {'job_id': JOB_ID, 'clip_index': 0,
+            'api_key': 'test-key', 'input_filename': 'mytitle_clip_1.mp4', 'generate_copy': True})
+        assert response.status_code == 200, response.text
+        assert seen == [('test-key', 0.0, 30.0)]
+        assert response.json()['generated_copy']['hook'] == 'The show must go on'
+        saved = json.loads(job['meta_path'].read_text())['shorts'][0]
+        assert saved['video_title_for_youtube_short'] == 'Cold plunge performance'
+        assert saved['viral_hook_text'] == 'The show must go on'
+        assert 'test-key' not in job['meta_path'].read_text()
+
+
 class TestGetEdl:
     def test_synthesizes_recipe_for_pristine_clip(self, job):
         resp = _request("GET", f"/api/clip/{JOB_ID}/0/edl")

@@ -3007,7 +3007,7 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
 
 
 from editor import VideoEditor
-from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video
+from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video, AUTO_CAPTION_STYLE
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import (analyze_video_for_titles, refine_titles, generate_thumbnail,
@@ -3018,6 +3018,7 @@ class EditRequest(BaseModel):
     clip_index: int
     api_key: Optional[str] = None
     input_filename: Optional[str] = None
+    generate_copy: bool = False
 
 @app.post("/api/edit")
 async def edit_clip(
@@ -3072,6 +3073,33 @@ async def edit_clip(
         if had_captions:
             filename = clean_name
             input_path = os.path.join(OUTPUT_DIR, req.job_id, clean_name)
+
+        # Raw review sources bypassed the normal clip-generation stage that
+        # supplies hook/title. Reuse its visual grounding writer, not a second
+        # prompt or copy generator. The selected window stays unchanged.
+        generated_copy = {}
+        if req.generate_copy:
+            meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
+            if not meta_files:
+                raise HTTPException(status_code=404, detail="Metadata not found")
+            with open(meta_files[0]) as f:
+                copy_meta = json.load(f)
+            copy_clip = copy_meta['shorts'][req.clip_index]
+            if not copy_clip.get('hook_grounding'):
+                import hook_grounding
+                segments, _ = _clip_recipe_parts(copy_clip)
+                copy_transcript = recut.virtual_transcript(copy_meta.get('transcript') or {}, segments)
+                def generate_copy():
+                    return hook_grounding.reground(input_path, copy_clip, copy_transcript,
+                        0.0, recut.total_duration(segments), api_key=final_api_key)
+                grounded = await asyncio.get_event_loop().run_in_executor(None, generate_copy)
+                if not grounded:
+                    raise HTTPException(status_code=502, detail="OpenShorts hook/title generation failed")
+                with open(meta_files[0], 'w') as f:
+                    json.dump(copy_meta, f, indent=2)
+            generated_copy = {"title": copy_clip.get('video_title_for_youtube_short') or '',
+                              "hook": copy_clip.get('viral_hook_text') or '',
+                              "grounding": copy_clip.get('hook_grounding')}
 
         # Define output path for edited video
         edited_filename = f"edited_{filename}"
@@ -3181,7 +3209,8 @@ async def edit_clip(
         return {
             "success": True,
             "new_video_url": new_video_url,
-            "edit_plan": plan
+            "edit_plan": plan,
+            "generated_copy": generated_copy,
         }
 
     except Exception as e:
@@ -3401,6 +3430,9 @@ class RerenderRequest(BaseModel):
     segments: List[RerenderSegment]
     snap_to_words: bool = False
     reapply_captions: bool = True
+    # Source-review workspaces have not gone through process/transcription.
+    # The first Auto Edit explicitly requests that existing prerequisite.
+    ensure_transcript: bool = False
     # None = inherit the recipe's framing (so plain trims keep the look);
     # 'auto' resets to the classifier; 'full'/'track' force a layout.
     framing: Optional[str] = None
@@ -3520,6 +3552,31 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
     reservation_id = await reserve_managed_action(
         request, rerender_minutes, req.job_id, "rerender")
 
+    # An empty imported transcript is UNKNOWN, not evidence of no speech.
+    # Reuse OpenShorts' normal ASR once, on the canonical/source clock; never
+    # transcribe the recut and then accidentally apply source offsets twice.
+    if (req.ensure_transcript and not recut.transcript_words(transcript)
+            and not data.get('editor_transcription_complete')):
+        from subtitles import transcribe_audio
+        asr_path = source_path or canonical_path
+        offset = 0.0 if source_path else canonical_range['start']
+        try:
+            loop = asyncio.get_event_loop()
+            transcript = await loop.run_in_executor(None, transcribe_audio, asr_path)
+            for segment in transcript.get('segments', []):
+                for item in [segment, *segment.get('words', [])]:
+                    for key in ('start', 'end'):
+                        if key in item:
+                            item[key] = float(item[key]) + offset
+            data['transcript'] = transcript
+            data['editor_transcription_complete'] = True
+            with open(json_files[0], 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            if reservation_id:
+                await _metering.release_reservation(reservation_id)
+            raise
+
     v_transcript = (recut.virtual_transcript(transcript, segments)
                     if req.reapply_captions else None)
 
@@ -3586,6 +3643,12 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
             "end": new_end,
             "duration": total,
             "render_path": "fast" if fast else "source",
+            "captions": [{"text": w['w'].strip(), "startMs": round(w['s'] * 1000),
+                          "endMs": round(w['e'] * 1000)}
+                         for w in recut.transcript_words(recut.virtual_transcript(transcript, segments))],
+            "transcription_complete": bool(data.get('editor_transcription_complete')
+                                            or recut.transcript_words(transcript)),
+            "caption_settings": dict(AUTO_CAPTION_STYLE),
         }
     except Exception as e:
         if reservation_id:

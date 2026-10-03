@@ -30,6 +30,7 @@ import {
   autoStartRecord,
   readAutoStartGuard,
   writeAutoStartGuard,
+  requestExistingAutoEdit,
 } from '../lib/autoStart';
 
 // Relative public paths: the editor is served from the same public origin as
@@ -71,11 +72,12 @@ const ALIGNMENT_LABEL = {
   realignment_required: { text: 'realignment required (audio)', cls: 'text-red-400' },
 };
 
-const PROGRESS_ORDER = ['save', 'clean', 'render', 'hook', 'subtitle', 'register', 'card', 'complete'];
+const PROGRESS_ORDER = ['save', 'clean', 'render', 'analysis', 'hook', 'subtitle', 'register', 'card', 'complete'];
 const PROGRESS_LABEL = {
   save: 'saving draft',
   clean: 'preparing clean source',
   render: 'rendering trim/reframe',
+  analysis: 'Gemini auto edit',
   hook: 'applying hook',
   subtitle: 'applying subtitles',
   register: 'registering version',
@@ -197,6 +199,9 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // One-time Auto Edit auto-start. `autoStart` is the record mirrored into the
   // durable draft; the decision and its guards live in lib/autoStart.js.
   const [autoStart, setAutoStart] = useState(null);
+  const [autoEdit, setAutoEdit] = useState(null);
+  const [sourceAutoEdit, setSourceAutoEdit] = useState(null);
+  const [bootstrapReady, setBootstrapReady] = useState(false);
 
   const videoRef = useRef(null);
   // The auto-start effect must call the LATEST handleRerender without taking a
@@ -324,6 +329,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // --- 2. Load durable clip metadata (bootstrap) + optional live enhancement -----
   useEffect(() => {
     if (!session) return;
+    setBootstrapReady(false);
     let cancelled = false;
     (async () => {
       try {
@@ -364,6 +370,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           throw new Error(msg);
         }
         const db = await bsRes.json();
+        setSourceAutoEdit(db.auto_edit || null);
+        setAutoEdit(session.draft?.auto_edit || db.auto_edit || null);
 
         // Required durable fields — hard fail, NEVER 0:00 duration or 0/0 trim.
         const src = db?.source_range || {};
@@ -445,8 +453,36 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             const st = await stRes.json();
             const clips = st?.result?.clips || st?.clips || [];
             const cl = clips[clip_index] || clips[0];
-            const rawUrl = cl?.video_url || cl?.view_url || null;
-            if (rawUrl) setClipUrl(getApiUrl(rawUrl));
+            let rawUrl = cl?.video_url || cl?.view_url || null;
+            if (rawUrl) {
+              if (db.auto_edit?.generated_copy?.hook && !outputBasename(rawUrl).includes('hooked_')) {
+                const restored = await apiFetch('/api/hook', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ job_id, clip_index,
+                    text: db.auto_edit.generated_copy.hook,
+                    ...(db.auto_edit.hook_settings || {}),
+                    input_filename: outputBasename(rawUrl) }),
+                });
+                if (!restored.ok) throw new Error(`Restore hook failed (HTTP ${restored.status})`);
+                rawUrl = (await restored.json()).new_video_url;
+              }
+              // A rehydrated workspace holds the durable clean generated edit.
+              // Restore its persisted captions with the existing subtitle
+              // endpoint; this does NOT rerun Gemini or register a version.
+              if (db.auto_edit?.captions_applied && capWords.length
+                  && !outputBasename(rawUrl).startsWith('subtitled_')) {
+                const style = db.auto_edit.caption_settings || {};
+                const restored = await apiFetch('/api/subtitle', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ job_id, clip_index, ...style,
+                    position: style.alignment || 'bottom', words: capWords,
+                    input_filename: outputBasename(rawUrl) }),
+                });
+                if (!restored.ok) throw new Error(`Restore captions failed (HTTP ${restored.status})`);
+                const rendered = await restored.json();
+                setClipUrl(getApiUrl(rendered.new_video_url));
+              } else setClipUrl(getApiUrl(rawUrl));
+            }
           }
         } catch (_) { /* ignore */ }
 
@@ -542,6 +578,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           if (d.hook_duration != null) setHookDuration(d.hook_duration);
           if (d.instruction != null) setInstruction(d.instruction);
         }
+        if (!cancelled) setBootstrapReady(true);
       } catch (e) {
         if (!cancelled) setError('Failed to load clip: ' + (e && e.message ? e.message : String(e)));
       } finally {
@@ -600,6 +637,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // Fire-and-forget; never blocks input.
   useEffect(() => {
     if (!session?.edit_session_id) return;
+    if (!bootstrapReady) return;
     if (!session?.session_token && !_resolvedSession?.session_token && !getEditorSessionToken()) return;
     const draft = {
       trim_start: Number(trimStart), trim_end: Number(trimEnd), framing,
@@ -633,6 +671,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       // memory and refs are gone — reads back "already started" instead of
       // starting a second render.
       auto_start: autoStart || undefined,
+      auto_edit: autoEdit || undefined,
       // The timeline document is the durable, ADDITIVE home for typed edit
       // events (lib/timelineState.js). Phase 2A writes exactly the range; the
       // shape is already the seam for split/remove/reorder/sfx/transition/
@@ -658,7 +697,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }).catch(() => {});
     }, 700);
     return () => clearTimeout(t);
-  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction, headerRegion, sourceDurationSec, autoStart]);
+  }, [session, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, titleOverlayEnabled, titleOverlayText, titleOverlayPosition, titleOverlayFontFamily, titleOverlayFontSize, titleOverlayColor, titleOverlayBackground, titleOverlayBackgroundColor, titleOverlayAlignment, hookRich, hookEntrance, instruction, headerRegion, sourceDurationSec, autoStart, autoEdit, bootstrapReady]);
 
   // Snapshot the inline field's selection EAGERLY, during the event.
   //
@@ -780,9 +819,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
 
       // Persist EVERY editable field server-side BEFORE render so a reload
       // cannot erase title/hook/caption/subtitle/trim work.
-      await apiFetch('/discord/editor/draft', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const draftPayload = {
           edit_session_id: session.edit_session_id,
           draft: {
             trim_start: Number(trimStart), trim_end: Number(trimEnd), framing,
@@ -805,8 +842,12 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
               ? readAutoStartGuard()[session.edit_session_id]
               : null) || autoStart || undefined,
           },
-        }),
+        };
+      const draftSave = await apiFetch('/discord/editor/draft', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(draftPayload),
       });
+      if (!draftSave.ok) return failStep(draftSave, 'Save draft');
 
       // ---- 1. Prepare clean source ----------------------------------------
       setProgress({ stage: 'clean', detail: 'Preparing clean source…' });
@@ -821,6 +862,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         body: JSON.stringify({
           job_id, clip_index, segments, snap_to_words: true,
           reapply_captions: !captionChanged,
+          ensure_transcript: true,
           framing: framing === 'auto' ? undefined : framing,
         }),
       });
@@ -839,9 +881,50 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       // Chain subsequent burns off the freshly recut file.
       let currentFile = rrData?.new_video_url ? outputBasename(rrData.new_video_url) : null;
 
+      // Run the EXISTING OpenShorts Gemini editor on the prepared clip. AUTO
+      // reframe is only a crop strategy; /clip/rerender never performs analysis.
+      setProgress({ stage: 'analysis', detail: 'OpenShorts Auto Edit: analyzing and applying edits…' });
+      const generated = await requestExistingAutoEdit({
+        apiFetch, jobId: job_id, clipIndex: clip_index, inputFilename: currentFile,
+        geminiKey: localStorage.getItem('gemini_key') || '',
+      });
+      generated.captions = rrData.captions || [];
+      generated.transcription_complete = !!rrData.transcription_complete;
+      generated.captions_applied = outputBasename(generated.output_url).startsWith('subtitled_');
+      generated.caption_settings = rrData.caption_settings || {};
+      const resolvedTitle = title.trim() || generated.generated_copy.title || '';
+      const resolvedHook = hook.trim() || generated.generated_copy.hook || '';
+      if (!title.trim() && resolvedTitle) setTitle(resolvedTitle);
+      if (!hook.trim() && resolvedHook) setHook(resolvedHook);
+      generated.generated_copy = { ...generated.generated_copy, title: resolvedTitle, hook: resolvedHook };
+      generated.hook_settings = { position: hookPosition, size: hookSize, style: hookStyle, duration_seconds: hookDuration };
+      if (!captionChanged && generated.captions.length) {
+        const text = generated.captions.map(w => w.text).join(' ');
+        setWords(generated.captions);
+        setCaptionText(text); setOriginalCaptionText(text);
+        setClipDurationSec(Number(trimEnd) - Number(trimStart));
+        caption_changes.text = text;
+        caption_changes.blocks = generated.captions;
+      }
+      currentFile = outputBasename(generated.output_url);
+      setAutoEdit(generated);
+      // Persist the actual plan BEFORE registration, using the existing draft
+      // JSON (no new store). A failed save must not register an untraceable edit.
+      const generatedDraft = { ...draftPayload.draft,
+        title: resolvedTitle, hook: resolvedHook,
+        caption_text: caption_changes.text,
+        auto_edit: generated,
+        auto_start: readAutoStartGuard()[session.edit_session_id] || autoStart,
+      };
+      const planSave = await apiFetch('/discord/editor/draft', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ edit_session_id: session.edit_session_id, draft: generatedDraft }),
+      });
+      if (!planSave.ok) return failStep(planSave, 'Save generated edit');
+
       // ---- 3. Hook (always apply if present, since rerender strips it) -------
       let hookApplied = false;
-      const hookText = (hook || '').trim();
+      const hookText = resolvedHook;
       if (hookText !== '' && currentFile) {
         setProgress({ stage: 'hook', detail: 'Applying hook…' });
         const burnRichPayload = (() => {
@@ -872,7 +955,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }
 
       // ---- 4. Styled captions (if changed) -----------------------------------
-      let subtitleApplied = false;
+      let subtitleApplied = generated.captions_applied;
       if (captionChanged && currentFile) {
         setProgress({ stage: 'subtitle', detail: 'Applying subtitles…' });
         const wordsPayload = (realigned?.blocks ?? []).map(b => ({ text: b.text, startMs: b.startMs, endMs: b.endMs }));
@@ -893,7 +976,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           const sData = await subRes.json();
           if (sData?.new_video_url) currentFile = outputBasename(sData.new_video_url);
           subtitleApplied = true;
-        }
+        } else return failStep(subRes, 'Subtitles');
       }
 
       // ---- 5. Header (if enabled) --------------------------------------------
@@ -931,9 +1014,9 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       }
 
       const finalUrl = currentFile
-        ? getApiUrl(`/videos/${job_id}/${currentFile}`)
+        ? getApiUrl(rrData.new_video_url.slice(0, rrData.new_video_url.lastIndexOf('/') + 1) + currentFile)
         : (rrData?.new_video_url ? getApiUrl(rrData.new_video_url) : null);
-      if (finalUrl) setDownloadUrl(finalUrl);
+      if (finalUrl) { setDownloadUrl(finalUrl); setClipUrl(finalUrl); }
 
       // Register the new asset version + send the re-review card.
       setProgress({ stage: 'register', detail: 'Registering new version…' });
@@ -952,8 +1035,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
           content_type: 'video/mp4',
           trim_start: Number(trimStart), trim_end: Number(trimEnd),
           caption_changes, crop_reframe_changes,
-          instruction: instruction.trim() || undefined, llm_assist_used: false,
-          edl_metadata: { caption_applied: subtitleApplied, hook_applied: hookApplied, header_applied: headerApplied, framing, segments,
+          instruction: instruction.trim() || undefined, llm_assist_used: true,
+          edl_metadata: { auto_edit: generated, caption_applied: subtitleApplied, hook_applied: hookApplied, header_applied: headerApplied, framing, segments,
             // LOOM owns correction/event persistence; the type-aware timeline
             // document rides the existing jsonb — no schema change. This is the
             // exact place a future typed edit event is added.
@@ -964,7 +1047,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             }),
             // The durable record of the hook's range styling, so the render
             // contract keeps the same semantics the preview showed.
-            hook_rich: hookApplied ? serializeRich(normalizeRich({ text: hook.trim(), base: hookRich.base, spans: hookRich.spans })) : null,
+            hook_rich: hookApplied ? serializeRich(normalizeRich({ text: resolvedHook, base: hookRich.base, spans: hookRich.spans })) : null,
             // The header's range styling, carried on the same durable record as
             // the rest of the overlay so a render/reopen keeps the semantics.
             header_rich: headerApplied && (headerRich.spans.length || headerRich.base.color || headerRich.base.font)
@@ -977,8 +1060,8 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
             background_color: titleOverlayBackgroundColor, alignment: titleOverlayAlignment,
           } : null },
           job_id, ready_file: currentFile || outputBasename(rrData?.new_video_url || ''),
-          proposed_title: title.trim() || undefined,
-          hook: hook.trim() || undefined,
+          proposed_title: resolvedTitle || undefined,
+          hook: resolvedHook || undefined,
           caption: socialCaption.trim() || undefined,
           duration_seconds: Number(trimEnd) - Number(trimStart),
           correction_summary: buildSummary(caption_changes, crop_reframe_changes),
@@ -998,7 +1081,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
     } finally {
       setRerendering(false);
     }
-  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, instruction, realigned, needsRealignment, trimInvalid, sourceDurationSec]);
+  }, [session, edl, trimStart, trimEnd, framing, title, hook, socialCaption, captionText, originalCaptionText, captionPosition, captionStyle, captionUppercase, captionFontName, captionFontSize, captionFontColor, captionHighlightColor, captionBorderColor, captionBorderWidth, captionBgColor, captionBgOpacity, captionEffect, captionBaseOpacity, hookPosition, hookSize, hookStyle, hookDuration, instruction, realigned, needsRealignment, trimInvalid, sourceDurationSec, autoStart]);
 
   // Keep the auto-start effect pointed at the latest Auto Edit flow without
   // depending on its identity (which changes on every keystroke).
@@ -1016,7 +1099,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
   // second render or a second version. lib/autoStart.js holds the rules.
   useEffect(() => {
     if (autoStartInvokedRef.current) return;      // one per mounted editor
-    if (loading || !session || !edl) return;      // wait for the real state
+    if (loading || !bootstrapReady || !session || !edl) return; // hydrate all generated state first
     if (trimInvalid || needsRealignment) return;  // a render now could not be valid
     const editSessionId = session.edit_session_id;
     const decision = autoStartDecision({
@@ -1025,6 +1108,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
       targetAssetVersion: session.target_asset_version,
       draftAutoStart: session.draft?.auto_start,
       guardRecord: readAutoStartGuard()[editSessionId],
+      sourceAutoEdit,
     });
     if (!decision.run) return;
     autoStartInvokedRef.current = true;
@@ -1050,7 +1134,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
         setAutoStart(failed);
       });
     return () => { cancelled = true; };
-  }, [loading, session, edl, trimInvalid, needsRealignment]);
+  }, [loading, bootstrapReady, session, edl, trimInvalid, needsRealignment, sourceAutoEdit]);
 
   const handleDownload = useCallback(async () => {
     if (!downloadUrl) return;
@@ -1149,7 +1233,7 @@ export default function ManualTrimEditor({ initialSession = null, activityUser =
               videoUrl={clipUrl}
               videoRef={videoRef}
               header={previewState.header}
-              hook={previewState.hook}
+              hook={clipUrl && outputBasename(clipUrl).includes('hooked_') ? null : previewState.hook}
               region={headerRegion}
               currentTime={videoTime}
               onTimeUpdate={setVideoTime}
